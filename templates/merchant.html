@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Merchant Dashboard — Business Owner Terminal</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <header class="navbar">
+    <a href="/" class="brand">
+      <span>Offline UPI Core Simulation</span>
+      <span class="brand-badge">Merchant POS</span>
+    </a>
+    <nav class="nav-links">
+      <a href="/payer" class="nav-link">Payer Device</a>
+      <a href="/merchant" class="nav-link active">Merchant Device</a>
+      <a href="/bank" class="nav-link">Bank Network</a>
+    </nav>
+  </header>
+
+  <main class="app-container">
+    <div class="page-header">
+      <div>
+        <h1 class="page-title">🏪 Business Owner POS Terminal</h1>
+        <p class="page-subtitle">Business: <strong>Bob's Tea & Snacks</strong> | Merchant ID: <span class="token-code" id="merchant-id-display">merchant_bob@upi</span></p>
+      </div>
+      <div id="merchant-conn-pill">
+        <span class="status-pill status-offline"><span class="status-dot"></span> Checking Bank Connectivity...</span>
+      </div>
+    </div>
+
+    <!-- Stats Cards -->
+    <div class="grid-4">
+      <div class="stat-card">
+        <div class="stat-label">Total Offline Payments</div>
+        <div class="stat-value" id="stat-total-count">0</div>
+        <div class="stat-subtext">Received on this device</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Pending Sync Count</div>
+        <div class="stat-value" style="color: var(--warning);" id="stat-pending-count">0</div>
+        <div class="stat-subtext">Awaiting bank settlement</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Amount Awaiting Sync</div>
+        <div class="stat-value" style="color: var(--warning);" id="stat-pending-amount">₹0.00</div>
+        <div class="stat-subtext">Queued offline IOUs</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Settled Payments</div>
+        <div class="stat-value" style="color: var(--success);" id="stat-settled-count">0</div>
+        <div class="stat-subtext">Confirmed by bank</div>
+      </div>
+    </div>
+
+    <div class="grid-2">
+      <!-- Token Ingestion / Verification Box -->
+      <div class="card">
+        <div class="card-header">
+          <h2 class="card-title">📥 Receive Offline Payment</h2>
+        </div>
+
+        <div class="tab-buttons">
+          <button type="button" class="tab-btn active" id="tab-btn-paste" onclick="switchInputTab('paste')">Paste / Direct Transfer</button>
+          <button type="button" class="tab-btn" id="tab-btn-file" onclick="switchInputTab('file')">Upload JSON File</button>
+        </div>
+
+        <!-- Form: Paste JSON -->
+        <div id="tab-paste">
+          <div class="form-group">
+            <label class="form-label" for="token-paste-input">Paste Signed Token JSON Package</label>
+            <textarea class="form-control" id="token-paste-input" rows="7" placeholder='Paste payload & signature JSON here, e.g. {"payload": {...}, "signature": "..."}'></textarea>
+          </div>
+        </div>
+
+        <!-- Form: File Upload -->
+        <div id="tab-file" style="display: none;">
+          <div class="form-group">
+            <label class="form-label" for="token-file-input">Select Offline Token JSON File</label>
+            <input type="file" class="form-control" id="token-file-input" accept=".json,application/json">
+          </div>
+        </div>
+
+        <button type="button" class="btn btn-primary btn-block" id="btn-verify-token">
+          ⚡ Verify & Accept Offline Payment
+        </button>
+
+        <!-- Live Verification Result Alert -->
+        <div id="verification-result-box" style="display: none; margin-top: 16px;"></div>
+      </div>
+
+      <!-- Sync with Bank Card -->
+      <div class="card">
+        <div class="card-header">
+          <h2 class="card-title">🔄 Delayed Bank Synchronization</h2>
+          <span class="badge badge-pending" id="sync-status-indicator">PENDING SYNC</span>
+        </div>
+
+        <p style="font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 14px;">
+          When internet connectivity or local connection to the central bank server is available, synchronize all queued offline tokens to finalize settlements and detect double-spend attempts.
+        </p>
+
+        <div style="background: var(--bg-subtle); padding: 14px; border-radius: 8px; margin-bottom: 16px;">
+          <div style="display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 6px;">
+            <span>Queue Status:</span>
+            <strong id="queue-summary-text">0 tokens pending (₹0.00)</strong>
+          </div>
+          <div style="font-size: 0.8rem; color: var(--text-muted);">
+            Persistence: Local SQLite ledger (<code style="background: #fff; padding: 1px 4px; border-radius: 3px;">merchant_queue_*.db</code>). Tokens survive device reboot.
+          </div>
+        </div>
+
+        <button type="button" class="btn btn-success btn-block" id="btn-sync-bank">
+          🌐 Sync with Bank Switch
+        </button>
+
+        <div id="sync-report-box" style="display: none; margin-top: 16px;"></div>
+      </div>
+    </div>
+
+    <!-- Offline Queue & Transaction History Table -->
+    <div class="card" style="margin-top: 24px;">
+      <div class="card-header">
+        <h2 class="card-title">📋 Local Queue & Transaction Ledger</h2>
+        <div style="display: flex; gap: 8px;">
+          <button class="btn btn-outline btn-sm" id="btn-refresh-queue">🔄 Refresh</button>
+          <button class="btn btn-outline btn-sm" id="btn-purge-settled">🧹 Purge Settled</button>
+        </div>
+      </div>
+
+      <div class="table-responsive">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Token ID</th>
+              <th>Payer ID</th>
+              <th>Amount</th>
+              <th>Received At</th>
+              <th>Verification Latency</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="merchant-queue-tbody">
+            <tr>
+              <td colspan="6" style="text-align: center; color: var(--text-muted); padding: 20px;">No offline payments in local queue.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <footer class="footer">
+      <p>Offline UPI Business Owner Device &bull; Sub-Second Local Verification &bull; Persistent SQLite Queue &bull; Never Labels Un-Synced Token As Settled</p>
+    </footer>
+  </main>
+
+  <script src="/static/js/merchant.js"></script>
+</body>
+</html>

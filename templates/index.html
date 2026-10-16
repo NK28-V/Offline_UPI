@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Offline UPI Simulation — Multi-Device System Portal</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <header class="navbar">
+    <a href="/" class="brand">
+      <span>Offline UPI Core Simulation</span>
+      <span class="brand-badge">Academic Lab</span>
+    </a>
+    <nav class="nav-links">
+      <a href="/payer" class="nav-link">Payer Device</a>
+      <a href="/merchant" class="nav-link">Merchant Device</a>
+      <a href="/bank" class="nav-link">Bank Network</a>
+    </nav>
+  </header>
+
+  <main class="app-container">
+    <div class="page-header">
+      <div>
+        <h1 class="page-title">Offline / Low-Connectivity UPI Payment System</h1>
+        <p class="page-subtitle">Multi-Device Architecture Simulation with Asymmetric Cryptography & Delayed Reconciliation</p>
+      </div>
+      <div id="network-pill-container">
+        <!-- Injected dynamically -->
+        <span class="status-pill status-online"><span class="status-dot"></span> Bank Network Online</span>
+      </div>
+    </div>
+
+    <!-- Quick Link Cards to the 3 Dashboards -->
+    <div class="grid-3" style="margin-top: 20px;">
+      <div class="card" style="border-top: 4px solid var(--primary);">
+        <div class="card-header">
+          <h2 class="card-title">📱 1. Payer Dashboard</h2>
+          <span class="badge badge-created">Customer Device</span>
+        </div>
+        <p style="color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 16px;">
+          Simulates a smartphone generating cryptographically signed offline tokens (IOUs). Enforces the <strong>₹500.00 safe offline spend limit</strong>, persistent balance tracking, and payee binding.
+        </p>
+        <ul style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 20px; padding-left: 20px;">
+          <li>RSA-2048 signing on-device</li>
+          <li>QR code and JSON file export</li>
+          <li>Tracks un-settled balance & cap</li>
+        </ul>
+        <a href="/payer" class="btn btn-primary btn-block">Open Payer Device →</a>
+      </div>
+
+      <div class="card" style="border-top: 4px solid var(--warning);">
+        <div class="card-header">
+          <h2 class="card-title">🏪 2. Business Owner</h2>
+          <span class="badge badge-pending">Merchant POS</span>
+        </div>
+        <p style="color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 16px;">
+          Simulates a merchant terminal accepting offline payments. Autonomously verifies RSA signatures in <strong>sub-second latency</strong> using a trusted payer registry, and queues in local SQLite.
+        </p>
+        <ul style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 20px; padding-left: 20px;">
+          <li>Sub-second local verification</li>
+          <li>Persistent queue survives reboot</li>
+          <li>Delayed batch sync with bank</li>
+        </ul>
+        <a href="/merchant" class="btn btn-warning btn-block">Open Merchant Device →</a>
+      </div>
+
+      <div class="card" style="border-top: 4px solid var(--success);">
+        <div class="card-header">
+          <h2 class="card-title">🏦 3. Bank Network</h2>
+          <span class="badge badge-settled">Central Ledger</span>
+        </div>
+        <p style="color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 16px;">
+          Simulates the central UPI Switch & Core Banking ledger. Performs atomic settlement, <strong>100% double-spend detection</strong> via SQLite savepoints, and 24-hour stale token flagging.
+        </p>
+        <ul style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 20px; padding-left: 20px;">
+          <li>Atomic duplicate detection</li>
+          <li>24-hour stale token review</li>
+          <li>Network online/offline toggle</li>
+        </ul>
+        <a href="/bank" class="btn btn-success btn-block">Open Bank Network →</a>
+      </div>
+    </div>
+
+    <!-- LAN Configuration & Multi-Device Setup Guide -->
+    <div class="card" style="margin-top: 30px;">
+      <div class="card-header">
+        <h2 class="card-title">🌐 Multi-Device Local Network (Wi-Fi / LAN) Setup Guide</h2>
+        <span class="badge badge-transferred">Zero Internet Required</span>
+      </div>
+      <p style="font-size: 0.92rem; color: var(--text-secondary); margin-bottom: 16px;">
+        This academic simulation can be operated across three physical devices (e.g. your laptop, a second laptop, or smartphones) connected to the same local Wi-Fi router or mobile hotspot, <strong>without requiring any active internet connection</strong>.
+      </p>
+
+      <div class="grid-2">
+        <div style="background: var(--bg-subtle); padding: 16px; border-radius: var(--radius-sm);">
+          <h3 style="font-size: 0.95rem; font-weight: 600; margin-bottom: 8px;">Host Server Address:</h3>
+          <p style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 10px;">
+            Run <code style="background: #fff; padding: 2px 6px; border-radius: 4px;">python app.py</code> on this host computer.
+          </p>
+          <div style="background: #fff; padding: 12px; border-radius: 6px; border: 1px solid var(--border-color);">
+            <div style="font-size: 0.8rem; color: var(--text-muted);">Local Machine:</div>
+            <div style="font-weight: 600; font-family: monospace; font-size: 1rem; color: var(--primary);">http://localhost:5000</div>
+            <div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 8px;">LAN Access (from other phones/laptops):</div>
+            <div id="lan-ip-display" style="font-weight: 600; font-family: monospace; font-size: 1.05rem; color: var(--success);">Detecting LAN IP...</div>
+          </div>
+        </div>
+
+        <div style="background: var(--bg-subtle); padding: 16px; border-radius: var(--radius-sm);">
+          <h3 style="font-size: 0.95rem; font-weight: 600; margin-bottom: 8px;">Two Demonstration Modes:</h3>
+          <div style="font-size: 0.85rem; color: var(--text-secondary); line-height: 1.6;">
+            <strong>Mode 1 (Completely Disconnected Transfer):</strong><br>
+            Payer generates token on phone/tab &rarr; Displays QR or downloads JSON file &rarr; Merchant scans QR or imports JSON file &rarr; Merchant verifies locally offline.
+            <br><br>
+            <strong>Mode 2 (LAN with Bank Service Simulation):</strong><br>
+            Toggle Bank Network to <em>"Offline"</em> &rarr; Merchant attempts sync (fails gracefully, retaining queue) &rarr; Toggle to <em>"Online"</em> &rarr; Sync completes and settles atomically.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer">
+      <p>Offline / Low-Connectivity UPI Payment System &bull; Academic Core Mechanics Simulation &bull; RSA-2048 &bull; SQLite Ledger</p>
+    </footer>
+  </main>
+
+  <script>
+    fetch('/api/network_info')
+      .then(res => res.json())
+      .then(data => {
+        document.getElementById('lan-ip-display').innerText = `http://${data.lan_ip}:${data.port}`;
+        const pill = document.getElementById('network-pill-container');
+        if (data.network_online) {
+          pill.innerHTML = '<span class="status-pill status-online"><span class="status-dot"></span> Bank Network Online</span>';
+        } else {
+          pill.innerHTML = '<span class="status-pill status-offline"><span class="status-dot"></span> Bank Network Simulated Offline</span>';
+        }
+      })
+      .catch(() => {
+        document.getElementById('lan-ip-display').innerText = 'http://<YOUR_LAN_IP>:5000';
+      });
+  </script>
+</body>
+</html>

@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bank Dashboard — Central UPI Switch & Settlement Network</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <header class="navbar">
+    <a href="/" class="brand">
+      <span>Offline UPI Core Simulation</span>
+      <span class="brand-badge">Central Bank Network</span>
+    </a>
+    <nav class="nav-links">
+      <a href="/payer" class="nav-link">Payer Device</a>
+      <a href="/merchant" class="nav-link">Merchant Device</a>
+      <a href="/bank" class="nav-link active">Bank Network</a>
+    </nav>
+  </header>
+
+  <main class="app-container">
+    <div class="page-header">
+      <div>
+        <h1 class="page-title">🏦 Central Bank / Payment Network Switch</h1>
+        <p class="page-subtitle">Central Ledger & Reconciliation Core &bull; ACID SQLite Engine &bull; Duplicate Detection &bull; Stale Token Audit</p>
+      </div>
+      <div>
+        <span class="status-pill status-online" id="bank-status-pill"><span class="status-dot"></span> Core Switch Active</span>
+      </div>
+    </div>
+
+    <!-- System Metrics / Statistics Grid -->
+    <div class="grid-3">
+      <div class="stat-card">
+        <div class="stat-label">Total Settled Value</div>
+        <div class="stat-value" style="color: var(--success);" id="stat-total-value">₹0.00</div>
+        <div class="stat-subtext">Sum of confirmed settlements</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Settled Transactions</div>
+        <div class="stat-value" style="color: var(--success);" id="stat-settled-count">0</div>
+        <div class="stat-subtext">Successfully reconciled tokens</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Double-Spend Rejections</div>
+        <div class="stat-value" style="color: var(--danger);" id="stat-duplicates-count">0</div>
+        <div class="stat-subtext">100% duplicate catch rate</div>
+      </div>
+    </div>
+
+    <div class="grid-3" style="margin-top: -8px;">
+      <div class="stat-card">
+        <div class="stat-label">Total Tokens Evaluated</div>
+        <div class="stat-value" id="stat-total-received">0</div>
+        <div class="stat-subtext">Received across all batches</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Flagged for 24h Review</div>
+        <div class="stat-value" style="color: var(--purple);" id="stat-flagged-count">0</div>
+        <div class="stat-subtext">Age exceeds 24-hour threshold</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Rejected Invalid / Forged</div>
+        <div class="stat-value" style="color: var(--danger);" id="stat-invalid-count">0</div>
+        <div class="stat-subtext">Bad signatures or payee mismatch</div>
+      </div>
+    </div>
+
+    <!-- Network Simulation & Test Lab Card -->
+    <div class="card" style="margin-bottom: 24px; border-left: 4px solid var(--primary);">
+      <div class="card-header">
+        <h2 class="card-title">🧪 Simulation Controls & Attack Demonstration Lab</h2>
+        <span class="badge badge-transferred">Interactive Testing</span>
+      </div>
+      <div class="grid-2">
+        <!-- Control 1: Network Simulator -->
+        <div style="background: var(--bg-subtle); padding: 16px; border-radius: 8px;">
+          <h3 style="font-size: 0.95rem; font-weight: 600; margin-bottom: 6px;">1. Network Availability Switch</h3>
+          <p style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 12px;">
+            Simulate a network outage between Merchant and Bank. When offline, merchant synchronization requests will fail gracefully without losing queued tokens.
+          </p>
+          <div style="display: flex; gap: 10px; align-items: center;">
+            <button class="btn btn-outline btn-sm" id="btn-toggle-network">
+              📶 Toggle Network State (<span id="net-toggle-label">Online</span>)
+            </button>
+            <span id="current-net-badge" class="badge badge-settled">ONLINE</span>
+          </div>
+        </div>
+
+        <!-- Control 2: Double-Spend / Duplicate Simulator -->
+        <div style="background: var(--bg-subtle); padding: 16px; border-radius: 8px;">
+          <h3 style="font-size: 0.95rem; font-weight: 600; margin-bottom: 6px;">2. Simulate Double-Spend Replay</h3>
+          <p style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 12px;">
+            Attempts to re-submit an already settled token ID directly to the central ledger to trigger and verify the SQLite IntegrityError duplicate defense.
+          </p>
+          <button class="btn btn-danger btn-sm" id="btn-simulate-duplicate">
+            🚨 Trigger Double-Spend Attempt
+          </button>
+          <div id="duplicate-sim-result" style="font-size: 0.8rem; margin-top: 8px; display: none;"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Trusted Payers & Registered Merchants -->
+    <div class="grid-2">
+      <!-- Trusted Payer Registry Card -->
+      <div class="card">
+        <div class="card-header">
+          <h2 class="card-title">🔑 Trusted Payer Public Key Registry</h2>
+          <span class="badge badge-settled" id="trusted-payers-count">1 Registered</span>
+        </div>
+        <p style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 12px;">
+          The bank maintains a pre-provisioned registry. Incoming offline tokens must match a registered payer's public key. Private keys are never exposed.
+        </p>
+        <div class="table-responsive">
+          <table class="table" style="font-size: 0.82rem;">
+            <thead>
+              <tr>
+                <th>Payer ID</th>
+                <th>Public Key (RSA-2048)</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="trusted-payers-tbody">
+              <tr>
+                <td><span class="token-code">alice@upi</span></td>
+                <td><code>MIIBIjANBgkqhkiG9w0BA...</code></td>
+                <td><span class="badge badge-settled">ACTIVE</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Sync Batches Audit Log -->
+      <div class="card">
+        <div class="card-header">
+          <h2 class="card-title">📦 Recent Sync Batches</h2>
+          <button class="btn btn-outline btn-sm" id="btn-refresh-bank">🔄 Refresh</button>
+        </div>
+        <div class="table-responsive">
+          <table class="table" style="font-size: 0.82rem;">
+            <thead>
+              <tr>
+                <th>Batch ID</th>
+                <th>Merchant</th>
+                <th>Tokens</th>
+                <th>Settled</th>
+                <th>Dups</th>
+                <th>Flagged</th>
+              </tr>
+            </thead>
+            <tbody id="sync-batches-tbody">
+              <tr>
+                <td colspan="6" style="text-align: center; color: var(--text-muted); padding: 14px;">No sync batches recorded yet.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Master Transaction Ledger -->
+    <div class="card" style="margin-top: 24px;">
+      <div class="card-header">
+        <h2 class="card-title">📑 Master Central Settlement Ledger</h2>
+      </div>
+      <div class="table-responsive">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Token ID</th>
+              <th>Payer ID</th>
+              <th>Merchant ID</th>
+              <th>Amount</th>
+              <th>Token Age</th>
+              <th>Settled At</th>
+              <th>Status</th>
+              <th>Audit Notes</th>
+            </tr>
+          </thead>
+          <tbody id="master-ledger-tbody">
+            <tr>
+              <td colspan="8" style="text-align: center; color: var(--text-muted); padding: 24px;">No settled transactions in ledger.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <footer class="footer">
+      <p>Central UPI Banking Switch &bull; SQLite ACID Engine &bull; Zero Public Key Forgery Risk &bull; Zero Private Key Exposure</p>
+    </footer>
+  </main>
+
+  <script src="/static/js/bank.js"></script>
+</body>
+</html>
