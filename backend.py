@@ -12,6 +12,7 @@ import os
 import json
 import hashlib
 import hmac
+import threading
 from typing import Dict, Any, List, Optional, Tuple
 from crypto_utils import (
     load_public_key_from_pem,
@@ -38,6 +39,7 @@ class BackendServer:
 
     def __init__(self, db_path: str = "offline_upi_backend.db", trusted_registry: Optional[Dict[str, str]] = None):
         self.db_path = db_path
+        self._lock = threading.Lock()
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self._initialize_schema()
@@ -73,6 +75,11 @@ class BackendServer:
                     updated_at REAL NOT NULL
                 );
             """)
+            cursor = self.conn.cursor()
+            cursor.execute("PRAGMA table_info(trusted_payers)")
+            cols = [col[1] for col in cursor.fetchall()]
+            if "updated_at" not in cols:
+                self.conn.execute("ALTER TABLE trusted_payers ADD COLUMN updated_at REAL DEFAULT 0;")
             self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS authorized_merchants (
                     merchant_id TEXT PRIMARY KEY,
@@ -285,8 +292,8 @@ class BackendServer:
         seen_in_current_batch = set()
         cursor = self.conn.cursor()
 
-        # Wrap batch processing in a database transaction
-        with self.conn:
+        # Wrap batch processing in a database transaction protected by thread lock
+        with self._lock, self.conn:
             for idx, token_pkg in enumerate(tokens):
                 if not isinstance(token_pkg, dict):
                     rejected_invalid.append({

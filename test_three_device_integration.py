@@ -27,6 +27,11 @@ import socket
 import subprocess
 import requests
 
+# Inject test credentials via environment variables (not CLI args).
+# DEMO/TEST ONLY — these values must NOT be used in production deployments.
+os.environ.setdefault("PAYER_PASSPHRASE", "test-passphrase-do-not-use-in-production")
+os.environ.setdefault("BANK_ADMIN_TOKEN", "test-admin-token-do-not-use-in-production")
+
 from provision_keys import provision_direct_db
 from payer import PayerDevice
 
@@ -76,6 +81,10 @@ class TestThreeDeviceIntegration(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.python_exe = sys.executable
+        # Environment that subprocess services inherit—credentials via env vars, never CLI args.
+        cls.child_env = dict(os.environ)
+        cls.child_env.setdefault("PAYER_PASSPHRASE", os.environ.get("PAYER_PASSPHRASE", ""))
+        cls.child_env.setdefault("BANK_ADMIN_TOKEN", os.environ.get("BANK_ADMIN_TOKEN", ""))
 
         # Free any existing listening sockets on test ports
         for port in [cls.PAYER_PORT, cls.MERCHANT_PORT, cls.BANK_PORT]:
@@ -89,7 +98,7 @@ class TestThreeDeviceIntegration(unittest.TestCase):
                 except Exception:
                     pass
 
-        # Pre-provision Alice in databases
+        # Pre-provision Alice in databases (passphrase comes from env)
         payer = PayerDevice(payer_id="alice@upi", state_file=cls.PAYER_STATE)
         provision_direct_db(
             payer_id="alice@upi",
@@ -132,13 +141,16 @@ class TestThreeDeviceIntegration(unittest.TestCase):
 
     def start_bank(self):
         free_port(self.BANK_PORT)
-        self.p_bank = subprocess.Popen([
-            self.python_exe, "bank_service.py",
-            "--host", "127.0.0.1",
-            "--port", str(self.BANK_PORT),
-            "--db", self.BANK_DB,
-            "--admin-token", self.ADMIN_TOKEN
-        ])
+        # SECURITY: admin token passed via env var, NOT as CLI argument
+        self.p_bank = subprocess.Popen(
+            [
+                self.python_exe, "bank_service.py",
+                "--host", "127.0.0.1",
+                "--port", str(self.BANK_PORT),
+                "--db", self.BANK_DB,
+            ],
+            env=self.child_env
+        )
         ready = self.wait_for_service(f"http://127.0.0.1:{self.BANK_PORT}/health")
         self.assertTrue(ready, f"Bank service failed to start on port {self.BANK_PORT}")
 
@@ -167,13 +179,17 @@ class TestThreeDeviceIntegration(unittest.TestCase):
 
     def start_payer(self):
         free_port(self.PAYER_PORT)
-        self.p_payer = subprocess.Popen([
-            self.python_exe, "payer_service.py",
-            "--host", "127.0.0.1",
-            "--port", str(self.PAYER_PORT),
-            "--payer-id", "alice@upi",
-            "--state-file", self.PAYER_STATE
-        ])
+        # SECURITY: passphrase passed via env var, NOT as CLI argument
+        self.p_payer = subprocess.Popen(
+            [
+                self.python_exe, "payer_service.py",
+                "--host", "127.0.0.1",
+                "--port", str(self.PAYER_PORT),
+                "--payer-id", "alice@upi",
+                "--state-file", self.PAYER_STATE
+            ],
+            env=self.child_env
+        )
         ready = self.wait_for_service(f"http://127.0.0.1:{self.PAYER_PORT}/health")
         self.assertTrue(ready, f"Payer service failed to start on port {self.PAYER_PORT}")
 
@@ -312,7 +328,29 @@ class TestThreeDeviceIntegration(unittest.TestCase):
         self.assertIn("receipt", receipt_pkg)
         self.assertIn("signature", receipt_pkg)
 
-        self.start_payer()
+        # Fetch the bank public key from the bank service and provision it
+        # into the payer state file so that the payer can pin and verify the receipt.
+        res_bank_pk = requests.get(f"{bank_url}/api/bank/public_key", timeout=2.0)
+        self.assertEqual(res_bank_pk.status_code, 200)
+        bank_public_key_pem = res_bank_pk.json()["public_key_pem"]
+
+        # Restart payer with the bank's public key pinned via env var
+        self.stop_payer()
+        env_with_bank_key = dict(self.child_env)
+        env_with_bank_key["BANK_PUBLIC_KEY_PEM"] = bank_public_key_pem
+        self.p_payer = subprocess.Popen(
+            [
+                self.python_exe, "payer_service.py",
+                "--host", "127.0.0.1",
+                "--port", str(self.PAYER_PORT),
+                "--payer-id", "alice@upi",
+                "--state-file", self.PAYER_STATE
+            ],
+            env=env_with_bank_key
+        )
+        ready = self.wait_for_service(f"http://127.0.0.1:{self.PAYER_PORT}/health")
+        self.assertTrue(ready, "Payer service failed to restart for reconciliation step")
+
         res_recon = requests.post(f"{payer_url}/api/payer/reconcile", json={
             "receipt": receipt_pkg
         }, timeout=2.0)

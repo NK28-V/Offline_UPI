@@ -68,6 +68,11 @@ def provision_direct_db(
                         updated_at REAL NOT NULL
                     );
                 """)
+                cursor = conn.cursor()
+                cursor.execute("PRAGMA table_info(trusted_payers)")
+                cols = [col[1] for col in cursor.fetchall()]
+                if "updated_at" not in cols:
+                    conn.execute("ALTER TABLE trusted_payers ADD COLUMN updated_at REAL DEFAULT 0;")
                 conn.execute("""
                     INSERT OR REPLACE INTO trusted_payers (payer_id, public_key_pem, registered_at, updated_at)
                     VALUES (?, ?, ?, ?);
@@ -86,9 +91,14 @@ def provision_over_api(
     public_key_pem: str,
     merchant_url: Optional[str] = None,
     bank_url: Optional[str] = None,
-    admin_token: str = "demo-admin-secret-2026"
+    admin_token: Optional[str] = None
 ) -> bool:
-    """Provisions trusted keys over HTTP APIs."""
+    """Provisions trusted keys over HTTP APIs.
+
+    SECURITY: admin_token must be supplied explicitly or via BANK_ADMIN_TOKEN env var.
+    Never use a hardcoded default.
+    """
+    resolved_token = admin_token or os.getenv("BANK_ADMIN_TOKEN", "")
     success = True
 
     # Merchant API
@@ -109,7 +119,7 @@ def provision_over_api(
     if bank_url:
         try:
             url = f"{bank_url.rstrip('/')}/api/bank/register_payer"
-            headers = {"X-Admin-Token": admin_token}
+            headers = {"X-Admin-Token": resolved_token}
             resp = requests.post(url, json={"payer_id": payer_id, "public_key_pem": public_key_pem}, headers=headers, timeout=3.0)
             if resp.status_code == 200:
                 print(f"  [OK] Registered '{payer_id}' with Bank Service at {bank_url}")
@@ -131,7 +141,7 @@ def main():
     parser.add_argument("--bank-db", default="offline_upi_backend.db", help="Bank SQLite database path")
     parser.add_argument("--merchant-url", default=None, help="Merchant service URL (optional, e.g. http://192.168.1.12:5002)")
     parser.add_argument("--bank-url", default=None, help="Bank service URL (optional, e.g. http://192.168.1.10:5003)")
-    parser.add_argument("--admin-token", default="demo-admin-secret-2026", help="Bank admin secret token")
+    # SECURITY: admin token is read from BANK_ADMIN_TOKEN env var, never from CLI args.
 
     args = parser.parse_args()
 
@@ -161,8 +171,8 @@ def main():
             payer_id=payer.payer_id,
             public_key_pem=pub_pem,
             merchant_url=args.merchant_url,
-            bank_url=args.bank_url,
-            admin_token=args.admin_token
+            bank_url=args.bank_url
+            # admin_token read from BANK_ADMIN_TOKEN env var inside provision_over_api
         )
 
     print("=" * 70 + "\n")

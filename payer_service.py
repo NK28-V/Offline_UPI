@@ -47,10 +47,18 @@ def create_payer_app(
     passphrase: Optional[str] = None,
     bank_public_key_pem: Optional[str] = None
 ) -> Flask:
-    """Factory creating the Payer Service Flask application."""
+    """Factory creating the Payer Service Flask application.
+
+    Passphrase resolution order (no hardcoded default):
+      1. 'passphrase' argument (use only in tests; never from CLI args).
+      2. PAYER_PASSPHRASE environment variable (required for production).
+    If neither is present and a state file exists, PayerDevice raises RuntimeError.
+    """
     app = Flask(__name__, template_folder="templates", static_folder="static")
 
-    configured_passphrase = passphrase or os.getenv("PAYER_PASSPHRASE", "demo-payer-passphrase")
+    # Resolve passphrase: argument takes priority (test injection), then env var.
+    # Never fall back to a hardcoded default.
+    configured_passphrase = passphrase or os.getenv("PAYER_PASSPHRASE", "")
 
     payer = PayerDevice(
         payer_id=payer_id,
@@ -225,10 +233,15 @@ def create_payer_app(
         Authoritatively reconciles tokens upon receipt of verifiable Bank-Signed Receipts.
         Validates the bank's digital signature, token ID, amount, and payer binding.
         Restores offline spending allowance safely.
+
+        SECURITY: Only cryptographically signed receipts from the trusted bank are accepted.
+        Legacy token-ID reconciliation (settled_token_ids) is REMOVED because it allows
+        balance restoration without any signature verification.
         """
         data = request.get_json(silent=True) or {}
         p = state["payer"]
 
+        # Single signed receipt package: {"receipt": {...}, "signature": "..."}
         receipt_pkg = data.get("receipt") if ("receipt" in data and isinstance(data.get("receipt"), dict) and "signature" in data["receipt"]) else data
         if isinstance(receipt_pkg, dict) and "receipt" in receipt_pkg and "signature" in receipt_pkg:
             try:
@@ -237,7 +250,7 @@ def create_payer_app(
             except ValueError as ve:
                 return jsonify({"error": str(ve)}), 400
 
-        # 2. Batch of signed receipts
+        # Batch of signed receipts: {"receipts": [{"receipt": {...}, "signature": "..."}, ...]}
         if "receipts" in data and isinstance(data["receipts"], list):
             results = []
             for r_pkg in data["receipts"]:
@@ -254,18 +267,15 @@ def create_payer_app(
                 "remaining_allowance": p.remaining_offline_allowance
             }), 200
 
-        # 3. Legacy token ID reconciliation (for backward compatibility in simple tests)
-        settled_ids = data.get("settled_token_ids", [])
-        if isinstance(settled_ids, list) and settled_ids:
-            restored = p.reconcile_settled_tokens(settled_ids)
+        # Legacy settled_token_ids path is intentionally removed — it bypassed
+        # cryptographic receipt verification and allowed arbitrary balance restoration.
+        if "settled_token_ids" in data:
             return jsonify({
-                "success": True,
-                "restored_amount": restored,
-                "unsynced_spent": p.unsynced_spent,
-                "remaining_allowance": p.remaining_offline_allowance
-            }), 200
+                "error": "The 'settled_token_ids' reconciliation path has been removed. "
+                         "Submit a bank-signed receipt package: {\"receipt\": {...}, \"signature\": \"...\"}."
+            }), 400
 
-        return jsonify({"error": "Either 'receipt' + 'signature', 'receipts', or 'settled_token_ids' is required."}), 400
+        return jsonify({"error": "A bank-signed receipt package is required: {\"receipt\": {...}, \"signature\": \"...\"}."}), 400
 
     return app
 
@@ -277,14 +287,28 @@ def main():
     parser.add_argument("--payer-id", default=os.getenv("PAYER_ID", "alice@upi"), help="Payer ID (default: alice@upi)")
     parser.add_argument("--offline-cap", type=float, default=float(os.getenv("OFFLINE_CAP", 500.0)), help="Offline spend cap (default: 500.0)")
     parser.add_argument("--state-file", default=os.getenv("PAYER_STATE_FILE", "payer_state_alice_upi.json"), help="State file path")
-    parser.add_argument("--passphrase", default=os.getenv("PAYER_PASSPHRASE", "demo-payer-passphrase"), help="Passphrase for encrypted private key storage")
+    # SECURITY: passphrase is NEVER accepted as a CLI argument (visible in process list).
+    # Set the PAYER_PASSPHRASE environment variable instead.
 
     args = parser.parse_args()
+
+    # Enforce explicit passphrase configuration — no hardcoded fallback.
+    passphrase = os.getenv("PAYER_PASSPHRASE", "")
+    if not passphrase:
+        print(
+            "[FATAL] PAYER_PASSPHRASE environment variable is not set.\n"
+            "  Set it before starting the payer service:\n"
+            "    Windows:  set PAYER_PASSPHRASE=your-strong-passphrase\n"
+            "    Linux/Mac: export PAYER_PASSPHRASE=your-strong-passphrase\n"
+            "  DEMO ONLY: For the academic demo, use any non-empty passphrase.",
+            file=sys.stderr
+        )
+        sys.exit(1)
+
     app = create_payer_app(
         payer_id=args.payer_id,
         offline_cap=args.offline_cap,
-        state_file=args.state_file,
-        passphrase=args.passphrase
+        state_file=args.state_file
     )
 
     lan_ip = get_lan_ip()

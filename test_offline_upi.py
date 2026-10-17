@@ -8,6 +8,12 @@ import unittest
 import time
 import os
 import math
+
+# Inject test credentials via environment variables (not CLI args).
+# DEMO/TEST ONLY — these values must NOT be used in production deployments.
+os.environ.setdefault("PAYER_PASSPHRASE", "test-passphrase-do-not-use-in-production")
+os.environ.setdefault("BANK_ADMIN_TOKEN", "test-admin-token-do-not-use-in-production")
+
 from payer import PayerDevice, OfflineSpendLimitExceededError
 from merchant import MerchantDevice
 from backend import BackendServer

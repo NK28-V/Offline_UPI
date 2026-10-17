@@ -7,6 +7,15 @@ protects local private keys via PBKDF2-HMAC-SHA256 and AES-256-GCM authenticated
 enforces an explicit token lifecycle (CREATED -> EXPORTED -> SETTLED),
 prevents unsafe cancellations once a token has been exported,
 and validates authoritative bank-signed receipts for secure offline allowance restoration.
+
+SECURITY MODEL — Bank Public Key Trust:
+  The payer never fetches the bank public key from network responses or untrusted
+  receipt packages. The trusted bank public key must be obtained through one of:
+    1. The BANK_PUBLIC_KEY_PEM environment variable (recommended for production).
+    2. A direct file read from a pre-provisioned local file (e.g. bank_pubkey.pem).
+    3. Explicit injection at PayerDevice construction time (for tests).
+  Any receipt_package that carries a 'bank_public_key' field has that field IGNORED.
+  If no pinned bank public key is configured, reconciliation fails with an explicit error.
 """
 
 import os
@@ -59,8 +68,17 @@ class PayerDevice:
         self.offline_cap_paise: int = int(round(float(offline_cap) * 100))
         self.unsynced_spent_paise: int = 0
         self.outstanding_tokens: Dict[str, Dict[str, Any]] = {}
-        self.passphrase = passphrase or os.getenv("PAYER_PASSPHRASE", "demo-payer-passphrase")
-        self.bank_public_key_pem = bank_public_key_pem
+
+        # --- Passphrase resolution ---
+        # Never use a hardcoded default for production. Require explicit injection
+        # or PAYER_PASSPHRASE env var. If neither is supplied and a state file already
+        # exists (encrypted), we must refuse to silently create a new identity.
+        self._passphrase = passphrase or os.getenv("PAYER_PASSPHRASE", "")
+
+        # --- Bank public key pinning ---
+        # Only the caller-supplied or env-provisioned key is trusted.
+        # We never accept a key embedded inside a receipt package.
+        self.bank_public_key_pem = bank_public_key_pem or os.getenv("BANK_PUBLIC_KEY_PEM", "")
 
         # Configure state persistence file
         if state_file:
@@ -69,8 +87,26 @@ class PayerDevice:
             safe_id = re.sub(r'[^a-zA-Z0-9_-]', '_', self.payer_id)
             self.state_file = f"payer_state_{safe_id}.json"
 
+        # Check if an existing encrypted state file is present.
+        # If yes and no passphrase provided, refuse to silently create a new identity.
+        state_exists = bool(self.state_file and os.path.exists(self.state_file))
+        if state_exists and not self._passphrase:
+            raise RuntimeError(
+                f"Payer state file '{self.state_file}' exists and contains an encrypted private key, "
+                "but no passphrase was supplied. "
+                "Set the PAYER_PASSPHRASE environment variable and retry. "
+                "Do NOT pass the passphrase as a command-line argument."
+            )
+
         # Load existing state if available, or generate a new key pair
         if not self._load_state():
+            if not self._passphrase:
+                raise RuntimeError(
+                    "PAYER_PASSPHRASE environment variable is not set. "
+                    "A passphrase is required to encrypt the private key before creating new payer state. "
+                    "Set PAYER_PASSPHRASE and retry. "
+                    "Do NOT pass the passphrase as a command-line argument."
+                )
             self._private_key, self._public_key = generate_rsa_key_pair()
             self.public_key_pem = public_key_to_pem(self._public_key)
             self._save_state()
@@ -109,7 +145,7 @@ class PayerDevice:
             return
 
         priv_pem = private_key_to_pem(self._private_key)
-        encrypted_container = encrypt_private_key_pem(priv_pem, self.passphrase)
+        encrypted_container = encrypt_private_key_pem(priv_pem, self._passphrase)
 
         state = {
             "payer_id": self.payer_id,
@@ -152,31 +188,41 @@ class PayerDevice:
                 self.unsynced_spent_paise = int(round(float(state.get("unsynced_spent", 0.0)) * 100))
 
             self.outstanding_tokens = state.get("outstanding_tokens", {})
-            self.bank_public_key_pem = state.get("bank_public_key_pem", self.bank_public_key_pem)
+            # Bank public key: only update from state if not already pinned by the caller.
+            # Never overwrite a caller-provided pinned key with state-file content.
+            if not self.bank_public_key_pem:
+                self.bank_public_key_pem = state.get("bank_public_key_pem", "")
 
             # 1. Check for encrypted private key container (modern standard)
             encrypted_container = state.get("encrypted_private_key")
             if encrypted_container:
-                priv_pem = decrypt_private_key_pem(encrypted_container, self.passphrase)
+                priv_pem = decrypt_private_key_pem(encrypted_container, self._passphrase)
                 pub_pem = state.get("public_key_pem")
                 self._private_key = serialization.load_pem_private_key(priv_pem.encode("utf-8"), password=None)
                 self._public_key = serialization.load_pem_public_key(pub_pem.encode("utf-8"))
                 self.public_key_pem = pub_pem
                 return True
 
-            # 2. Check for legacy plaintext private key and automatically migrate it
+            # 2. Legacy plaintext private key — migrate to encrypted format.
+            # If no passphrase is available, refuse to proceed (do not silently create new identity).
             legacy_priv_pem = state.get("private_key_pem")
             legacy_pub_pem = state.get("public_key_pem")
             if legacy_priv_pem and legacy_pub_pem:
+                if not self._passphrase:
+                    raise RuntimeError(
+                        f"State file '{self.state_file}' contains a PLAINTEXT private key that needs migration. "
+                        "Set PAYER_PASSPHRASE to encrypt it. "
+                        "Do NOT pass the passphrase as a command-line argument."
+                    )
                 self._private_key = serialization.load_pem_private_key(legacy_priv_pem.encode("utf-8"), password=None)
                 self._public_key = serialization.load_pem_public_key(legacy_pub_pem.encode("utf-8"))
                 self.public_key_pem = legacy_pub_pem
-                # Migrate to encrypted format on disk immediately
+                # Migrate to encrypted format on disk immediately — no plaintext copy is kept
                 self._save_state()
                 return True
 
         except Exception as e:
-            if "Failed to decrypt" in str(e):
+            if "Failed to decrypt" in str(e) or "PAYER_PASSPHRASE" in str(e) or "plaintext" in str(e).lower():
                 raise
             return False
         return False
@@ -306,12 +352,19 @@ class PayerDevice:
         Authoritatively reconciles a token using a verifiable Bank-Signed Receipt.
         Enforces:
         1. Receipt structure validation (receiptID, tokenID, payerID, payeeID, amount, status, settled_at).
-        2. Cryptographic signature verification using the bank's registered public key.
+        2. Cryptographic signature verification ONLY using the pre-pinned bank public key.
+           Any 'bank_public_key' field embedded in the receipt_package is IGNORED to prevent
+           an attacker from supplying their own key as a trust anchor.
         3. Payer identity binding (receipt['payerID'] == self.payer_id).
         4. Token existence in outstanding tokens.
         5. Amount match against on-device reservation.
         6. Replay protection (does not credit or deduct twice).
         7. Strict ₹500 cap ceiling enforcement.
+
+        SECURITY: The bank public key is sourced exclusively from:
+          a) the 'bank_public_key' argument (for tests that inject the object directly), or
+          b) self.bank_public_key_pem (pinned at construction / provisioning).
+          It is NEVER read from receipt_package.
         """
         if not isinstance(receipt_package, dict):
             raise ValueError("Receipt package must be a dictionary.")
@@ -326,13 +379,18 @@ class PayerDevice:
         if not isinstance(signature, str) or not signature.strip():
             raise ValueError("Bank receipt is missing cryptographic signature.")
 
-        # Determine Bank public key for verification
+        # --- Trusted bank public key resolution ---
+        # Only use the caller-injected key object (for unit tests) OR the pre-pinned PEM.
+        # NEVER fall back to any key supplied inside the receipt_package itself.
         pub_key = bank_public_key
         if not pub_key:
-            bank_pem = receipt_package.get("bank_public_key") or self.bank_public_key_pem
-            if not bank_pem:
-                raise ValueError("Bank public key is required to verify settlement receipt.")
-            pub_key = load_public_key_from_pem(bank_pem)
+            if not self.bank_public_key_pem:
+                raise ValueError(
+                    "No trusted bank public key is pinned for this payer. "
+                    "Provision the bank public key via BANK_PUBLIC_KEY_PEM environment variable "
+                    "or the bank_public_key_pem constructor argument before reconciling receipts."
+                )
+            pub_key = load_public_key_from_pem(self.bank_public_key_pem)
 
         if not verify_signature(receipt, signature, pub_key):
             raise ValueError("Bank receipt cryptographic signature verification FAILED: forged or tampered receipt.")
@@ -385,10 +443,16 @@ class PayerDevice:
             "remaining_allowance": self.remaining_offline_allowance
         }
 
-    def reconcile_settled_tokens(self, settled_token_ids: List[str]) -> float:
+    # -------------------------------------------------------------------------
+    # DEPRECATED INTERNAL HELPERS — NOT EXPOSED VIA ANY HTTP API
+    # These methods bypass cryptographic receipt verification and exist only for
+    # internal test cleanup (tearDown). They must NEVER be called from HTTP handlers.
+    # -------------------------------------------------------------------------
+
+    def _internal_reconcile_settled_tokens(self, settled_token_ids: List[str]) -> float:
         """
-        Legacy reconciliation helper by token IDs (retains backward compatibility for tests/scripts).
-        Protects against double reconciliation.
+        INTERNAL USE ONLY — test teardown / trusted internal callers only.
+        Reconciles by token ID without cryptographic proof. Not exposed via HTTP.
         """
         restored_paise = 0
         for tid in settled_token_ids:
@@ -406,18 +470,30 @@ class PayerDevice:
             self._save_state()
         return round(restored_paise / 100.0, 2)
 
-    def reconcile_settled_amount(self, settled_amount: float) -> None:
-        """Fallback reconciliation method by total settled amount."""
+    def _internal_reconcile_settled_amount(self, settled_amount: float) -> None:
+        """
+        INTERNAL USE ONLY — test teardown / trusted internal callers only.
+        Reduces unsynced spend by amount without cryptographic proof. Not exposed via HTTP.
+        """
         if settled_amount > 0 and math.isfinite(settled_amount):
             amt_paise = int(round(float(settled_amount) * 100))
             self.unsynced_spent_paise = max(0, self.unsynced_spent_paise - amt_paise)
             self._save_state()
 
-    def reset_offline_balance(self) -> None:
-        """Resets unsynced spend counter and clears outstanding tokens."""
+    def _internal_reset_offline_balance(self) -> None:
+        """
+        INTERNAL USE ONLY — test teardown / trusted internal callers only.
+        Resets unsynced spend counter and clears outstanding tokens. Not exposed via HTTP.
+        """
         self.unsynced_spent_paise = 0
         self.outstanding_tokens.clear()
         self._save_state()
+
+    # Compatibility aliases for local unit tests and non-network test fixtures.
+    # CRITICAL: These internal helper methods are NOT exposed on any HTTP route.
+    reset_offline_balance = _internal_reset_offline_balance
+    reconcile_settled_tokens = _internal_reconcile_settled_tokens
+    reconcile_settled_amount = _internal_reconcile_settled_amount
 
     def delete_state(self) -> None:
         """Deletes the state file from disk (useful for clean tests)."""

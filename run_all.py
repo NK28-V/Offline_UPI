@@ -38,7 +38,33 @@ def main():
     print("  LAUNCHING TRUE THREE-DEVICE OFFLINE UPI SERVICES")
     print("=" * 80)
 
-    # 1. Provision default payer identity into merchant and bank registries
+    # --- Enforce required credentials from environment (never from CLI args) ---
+    payer_passphrase = os.getenv("PAYER_PASSPHRASE", "")
+    bank_admin_token = os.getenv("BANK_ADMIN_TOKEN", "")
+
+    missing = []
+    if not payer_passphrase:
+        missing.append("PAYER_PASSPHRASE")
+    if not bank_admin_token:
+        missing.append("BANK_ADMIN_TOKEN")
+
+    if missing:
+        print(
+            "[FATAL] Required environment variables are not set: " + ", ".join(missing) + "\n"
+            "  Set them before running:\n"
+            "    Windows:\n"
+            "      set PAYER_PASSPHRASE=your-strong-passphrase\n"
+            "      set BANK_ADMIN_TOKEN=your-strong-admin-token\n"
+            "    Linux/Mac:\n"
+            "      export PAYER_PASSPHRASE=your-strong-passphrase\n"
+            "      export BANK_ADMIN_TOKEN=your-strong-admin-token\n"
+            "  DEMO ONLY: Any non-empty strings work for the academic demonstration.",
+            file=sys.stderr
+        )
+        sys.exit(1)
+
+    # 1. Provision default payer identity into merchant and bank registries.
+    # PayerDevice reads PAYER_PASSPHRASE from the environment automatically.
     payer = PayerDevice(payer_id="alice@upi", state_file="payer_state_alice_upi.json")
     print("\n[PROVISIONING] Registering default payer 'alice@upi' across registries...")
     provision_direct_db(

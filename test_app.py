@@ -7,6 +7,11 @@ delayed sync, network simulation, and duplicate prevention.
 import unittest
 import json
 import os
+
+# DEMO/TEST ONLY — credentials for test execution (never in production)
+os.environ.setdefault("PAYER_PASSPHRASE", "demo-payer-passphrase")
+os.environ.setdefault("BANK_ADMIN_TOKEN", "test-admin-token-do-not-use-in-production")
+
 from app import app, payer, merchant, backend
 
 

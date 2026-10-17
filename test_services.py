@@ -5,6 +5,7 @@ Unit and Component Tests for Independent Services:
 - Device 3: Bank Service (bank_service.py)
 Validates APIs, private-key isolation, integer paise limit boundary (₹500.00 vs ₹500.01),
 admin authentication, offline local verification, persistence, and batch settlement.
+Also includes security regression tests for all fixes in this audit cycle.
 """
 
 import unittest
@@ -12,15 +13,24 @@ import os
 import time
 import json
 import sqlite3
+import hmac
 from typing import Dict, Any
+
+# Inject test credentials via environment variables (not CLI args).
+# DEMO/TEST ONLY — these values must NOT be used in production deployments.
+os.environ.setdefault("PAYER_PASSPHRASE", "test-passphrase-do-not-use-in-production")
+os.environ.setdefault("BANK_ADMIN_TOKEN", "test-admin-token-do-not-use-in-production")
 
 from payer_service import create_payer_app
 from merchant_service import create_merchant_app
 from bank_service import create_bank_app
-from crypto_utils import generate_rsa_key_pair, public_key_to_pem, sign_payload
+from crypto_utils import generate_rsa_key_pair, public_key_to_pem, sign_payload, private_key_to_pem
 
 
 class TestServices(unittest.TestCase):
+    # Test passphrase — injected via env var, not hardcoded default.
+    TEST_PASSPHRASE = "test-passphrase-do-not-use-in-production"
+
     def setUp(self):
         self.payer_state = "test_svc_payer_state.json"
         self.merchant_db = "test_svc_merchant_queue.db"
@@ -38,10 +48,17 @@ class TestServices(unittest.TestCase):
         self.bank_app = create_bank_app(db_path=self.bank_db, admin_token=self.admin_token)
         self.bank_client = self.bank_app.test_client()
 
+        # Retrieve the bank's public key PEM so payer can pin it for receipt verification.
+        with self.bank_app.test_request_context():
+            bank_pk_resp = self.bank_client.get("/api/bank/public_key")
+            self.bank_public_key_pem = bank_pk_resp.get_json()["public_key_pem"]
+
         self.payer_app = create_payer_app(
             payer_id="alice@upi",
             offline_cap=500.0,
-            state_file=self.payer_state
+            state_file=self.payer_state,
+            passphrase=self.TEST_PASSPHRASE,
+            bank_public_key_pem=self.bank_public_key_pem
         )
         self.payer_client = self.payer_app.test_client()
 
@@ -163,10 +180,12 @@ class TestServices(unittest.TestCase):
         })
         self.assertEqual(r_gen.status_code, 200)
 
-        # Create new app instance loading the same state file
+        # Create new app instance loading the same state file (must supply passphrase)
         new_app = create_payer_app(
             payer_id="alice@upi",
-            state_file=self.payer_state
+            state_file=self.payer_state,
+            passphrase=self.TEST_PASSPHRASE,
+            bank_public_key_pem=self.bank_public_key_pem
         )
         new_client = new_app.test_client()
         r_status = new_client.get("/api/payer/status")
@@ -735,6 +754,331 @@ class TestServices(unittest.TestCase):
         self.assertEqual(r_bank.status_code, 400)
         self.assertTrue(r_bank.is_json)
         self.assertIn("error", r_bank.get_json())
+
+
+    # =========================================================================
+    # SECURITY REGRESSION TESTS (Audit Cycle)
+    # =========================================================================
+
+    def test_forged_receipt_with_attacker_public_key_is_rejected(self):
+        """
+        REGRESSION: Payer must reject a receipt signed by an attacker key even when
+        the attacker embeds their own public key inside the receipt package.
+        The payer must use ONLY the pre-pinned trusted bank key — never the
+        key supplied in the receipt_package.
+        """
+        # Generate a token
+        r_gen = self.payer_client.post("/api/payer/generate", json={
+            "amount": 100.0, "payee_id": "merchant_bob@upi"
+        })
+        token_id = r_gen.get_json()["token_package"]["payload"]["tokenID"]
+
+        # Attacker generates their own key pair
+        att_priv, att_pub = generate_rsa_key_pair()
+        att_pub_pem = public_key_to_pem(att_pub)
+
+        # Attacker forges a receipt and signs it with their own key
+        forged_receipt_payload = {
+            "receiptID": "forged-receipt-id-001",
+            "tokenID": token_id,
+            "payerID": "alice@upi",
+            "payeeID": "merchant_bob@upi",
+            "amount": 100.0,
+            "status": "SETTLED",
+            "settled_at": time.time()
+        }
+        forged_sig = sign_payload(forged_receipt_payload, att_priv)
+
+        # Package includes attacker's public key as a 'bank_public_key' field
+        # The payer MUST ignore this field and only use its pinned key
+        malicious_pkg = {
+            "receipt": forged_receipt_payload,
+            "signature": forged_sig,
+            "bank_public_key": att_pub_pem  # attacker-supplied trust anchor
+        }
+
+        r_recon = self.payer_client.post("/api/payer/reconcile", json={"receipt": malicious_pkg})
+        self.assertEqual(r_recon.status_code, 400)
+        err_msg = r_recon.get_json()["error"]
+        self.assertIn("signature verification FAILED", err_msg)
+
+        # Allowance must remain unchanged
+        r_stat = self.payer_client.get("/api/payer/status")
+        self.assertEqual(r_stat.get_json()["unsynced_spent"], 100.0)
+
+    def test_missing_trusted_bank_key_blocks_reconciliation(self):
+        """
+        REGRESSION: When no bank public key is pinned, reconcile must fail with
+        a clear error rather than accepting any receipt or crashing.
+        """
+        from payer import PayerDevice
+
+        # Create a payer WITHOUT a bank public key pinned
+        state_file = "test_no_bank_key_payer.json"
+        if os.path.exists(state_file):
+            os.remove(state_file)
+        try:
+            p = PayerDevice(
+                payer_id="no_bank_key_payer@upi",
+                passphrase=self.TEST_PASSPHRASE,
+                state_file=state_file
+                # bank_public_key_pem is intentionally omitted
+            )
+            p.generate_token(50.0, payee_id="merchant_bob@upi")
+
+            fake_receipt_pkg = {
+                "receipt": {
+                    "receiptID": "r1",
+                    "tokenID": "t1",
+                    "payerID": "no_bank_key_payer@upi",
+                    "payeeID": "merchant_bob@upi",
+                    "amount": 50.0,
+                    "status": "SETTLED",
+                    "settled_at": time.time()
+                },
+                "signature": "invalidsig"
+            }
+
+            with self.assertRaises(ValueError) as ctx:
+                p.reconcile_with_bank_receipt(fake_receipt_pkg)
+            self.assertIn("No trusted bank public key", str(ctx.exception))
+        finally:
+            if os.path.exists(state_file):
+                os.remove(state_file)
+
+    def test_legacy_token_id_reconciliation_bypass_is_removed(self):
+        """
+        REGRESSION: The 'settled_token_ids' reconciliation path MUST be removed.
+        Submitting settled_token_ids without a signed receipt must be rejected with 400.
+        """
+        # Generate a token to create an outstanding balance
+        r_gen = self.payer_client.post("/api/payer/generate", json={
+            "amount": 150.0, "payee_id": "merchant_bob@upi"
+        })
+        token_id = r_gen.get_json()["token_package"]["payload"]["tokenID"]
+        self.assertEqual(r_gen.get_json()["unsynced_spent"], 150.0)
+
+        # Attempt to restore balance using the legacy bypass
+        r_bypass = self.payer_client.post("/api/payer/reconcile", json={
+            "settled_token_ids": [token_id]
+        })
+        self.assertEqual(r_bypass.status_code, 400)
+        self.assertIn("settled_token_ids", r_bypass.get_json()["error"].lower()
+                      or "removed" in r_bypass.get_json()["error"].lower())
+
+        # Balance must be completely unchanged
+        r_stat = self.payer_client.get("/api/payer/status")
+        self.assertEqual(r_stat.get_json()["unsynced_spent"], 150.0)
+
+    def test_plaintext_private_key_never_emitted_in_state_file(self):
+        """
+        REGRESSION: The state file on disk must never contain a plaintext
+        PEM private key. Only the AES-256-GCM encrypted container is allowed.
+        """
+        with open(self.payer_state, "r", encoding="utf-8") as f:
+            raw = f.read()
+            state_data = json.loads(raw)
+
+        # Must not contain plaintext PEM marker
+        self.assertNotIn("BEGIN RSA PRIVATE KEY", raw)
+        self.assertNotIn("BEGIN PRIVATE KEY", raw)
+        self.assertNotIn("private_key_pem", state_data)
+
+        # Must have properly structured encrypted container
+        container = state_data.get("encrypted_private_key")
+        self.assertIsNotNone(container)
+        self.assertIn("salt_b64", container)
+        self.assertIn("nonce_b64", container)
+        self.assertIn("ciphertext_b64", container)
+        self.assertEqual(container["cipher"], "AES-256-GCM")
+
+    def test_missing_passphrase_fails_safely_for_existing_state(self):
+        """
+        REGRESSION: When PAYER_PASSPHRASE is missing and a state file exists,
+        PayerDevice must raise RuntimeError — not silently create a new identity
+        and not use any hardcoded default.
+        """
+        from payer import PayerDevice
+        import unittest.mock as mock
+
+        # State file already exists from setUp
+        self.assertTrue(os.path.exists(self.payer_state))
+
+        # Try to open with no passphrase and no PAYER_PASSPHRASE env var
+        with mock.patch.dict(os.environ, {"PAYER_PASSPHRASE": "", "BANK_PUBLIC_KEY_PEM": ""}, clear=False):
+            with self.assertRaises(RuntimeError) as ctx:
+                PayerDevice(
+                    payer_id="alice@upi",
+                    passphrase="",  # explicitly empty
+                    state_file=self.payer_state
+                )
+        self.assertIn("PAYER_PASSPHRASE", str(ctx.exception))
+
+    def test_wrong_passphrase_fails_with_decrypt_error(self):
+        """
+        REGRESSION: A wrong passphrase must fail with ValueError (AES-GCM authentication
+        failure), not succeed with a garbage key or silently create a new identity.
+        """
+        from payer import PayerDevice
+        with self.assertRaises(ValueError) as ctx:
+            PayerDevice(
+                payer_id="alice@upi",
+                passphrase="wrong-passphrase-cannot-decrypt",
+                state_file=self.payer_state
+            )
+        self.assertIn("Failed to decrypt", str(ctx.exception))
+
+    def test_admin_token_rejected_in_query_param(self):
+        """
+        REGRESSION: Admin token submitted as a URL query parameter must be rejected.
+        Secrets in URLs appear in server access logs.
+        """
+        # register_payer with admin token in query string — must be 401
+        r = self.bank_client.post(
+            f"/api/bank/register_payer?admin_token={self.admin_token}",
+            json={"payer_id": "eve@upi", "public_key_pem": self.payer_pub_pem}
+        )
+        self.assertEqual(r.status_code, 401)
+
+        # toggle_network with admin token in query string — must be 401
+        r2 = self.bank_client.post(f"/api/bank/toggle_network?admin_token={self.admin_token}")
+        self.assertEqual(r2.status_code, 401)
+
+    def test_admin_token_rejected_in_json_body(self):
+        """
+        REGRESSION: Admin token submitted inside the JSON request body must be rejected.
+        Only X-Admin-Token header is accepted.
+        """
+        r = self.bank_client.post(
+            "/api/bank/register_payer",
+            json={
+                "payer_id": "eve@upi",
+                "public_key_pem": self.payer_pub_pem,
+                "admin_token": self.admin_token  # body injection — must be rejected
+            }
+        )
+        self.assertEqual(r.status_code, 401)
+
+        r2 = self.bank_client.post(
+            "/api/bank/toggle_network",
+            json={"admin_token": self.admin_token}  # body injection — must be rejected
+        )
+        self.assertEqual(r2.status_code, 401)
+
+    def test_all_admin_routes_reject_unauthenticated_requests(self):
+        """
+        REGRESSION: Every administrative endpoint must return 401 without valid
+        X-Admin-Token header. No endpoint must be accessible unauthenticated.
+        """
+        admin_routes = [
+            ("POST", "/api/bank/register_payer", {"payer_id": "x", "public_key_pem": "y"}),
+            ("POST", "/api/bank/register_merchant", {"merchant_id": "x", "api_key": "y"}),
+            ("POST", "/api/bank/toggle_network", {}),
+            ("POST", "/api/bank/simulate_duplicate", {}),
+        ]
+        for method, path, body in admin_routes:
+            if method == "POST":
+                r = self.bank_client.post(path, json=body)
+            else:
+                r = self.bank_client.get(path)
+            self.assertEqual(
+                r.status_code, 401,
+                f"Expected 401 for unauthenticated {method} {path}, got {r.status_code}"
+            )
+
+    def test_admin_token_constant_time_comparison(self):
+        """
+        REGRESSION: Admin auth uses hmac.compare_digest for constant-time comparison.
+        Verify the wrong token with different prefix lengths still fails —
+        this is a structural check, not a timing oracle.
+        """
+        for bad_token in ["", "a", self.admin_token[:-1], self.admin_token + "x", "X" * len(self.admin_token)]:
+            r = self.bank_client.post(
+                "/api/bank/toggle_network",
+                headers={"X-Admin-Token": bad_token}
+            )
+            self.assertEqual(r.status_code, 401, f"Token '{bad_token}' was incorrectly accepted")
+
+    def test_partial_reconcile_leaves_other_tokens_outstanding(self):
+        """
+        REGRESSION: Reconciling one settled token must restore only that token's
+        allowance; other outstanding tokens must remain reserved.
+        """
+        # Generate two tokens
+        r1 = self.payer_client.post("/api/payer/generate", json={
+            "amount": 100.0, "payee_id": "merchant_bob@upi"
+        })
+        token_pkg_1 = r1.get_json()["token_package"]
+        tid_1 = token_pkg_1["payload"]["tokenID"]
+
+        r2 = self.payer_client.post("/api/payer/generate", json={
+            "amount": 200.0, "payee_id": "merchant_bob@upi"
+        })
+        self.assertEqual(self.payer_client.get("/api/payer/status").get_json()["unsynced_spent"], 300.0)
+
+        # Bank settles only the first token
+        r_sync = self.bank_client.post(
+            "/api/bank/sync_batch",
+            headers={"X-Merchant-Key": self.merchant_key},
+            json={"merchant_id": "merchant_bob@upi", "tokens": [token_pkg_1]}
+        )
+        self.assertEqual(r_sync.get_json()["settled_count"], 1)
+        receipt_pkg = r_sync.get_json()["receipts"][0]
+
+        # Payer reconciles with only the first receipt
+        r_recon = self.payer_client.post("/api/payer/reconcile", json={"receipt": receipt_pkg})
+        self.assertEqual(r_recon.status_code, 200)
+        data = r_recon.get_json()
+        self.assertTrue(data["success"])
+        self.assertEqual(data["token_id"], tid_1)
+
+        # Only \u20b9100 restored — \u20b9200 from second token still reserved
+        r_stat = self.payer_client.get("/api/payer/status")
+        self.assertEqual(r_stat.get_json()["unsynced_spent"], 200.0)
+        self.assertEqual(r_stat.get_json()["remaining_allowance"], 300.0)
+
+    def test_500_cap_and_duplicate_settlement_protection(self):
+        """
+        REGRESSION: \u20b9500 cap must hold across reconciliation; duplicate settlement
+        receipts must be detected and allowance must not be restored twice.
+        """
+        # Fill to exactly \u20b9500
+        r1 = self.payer_client.post("/api/payer/generate", json={
+            "amount": 500.0, "payee_id": "merchant_bob@upi"
+        })
+        self.assertEqual(r1.status_code, 200)
+        token_pkg = r1.get_json()["token_package"]
+
+        # Cannot spend beyond cap
+        r2 = self.payer_client.post("/api/payer/generate", json={
+            "amount": 0.01, "payee_id": "merchant_bob@upi"
+        })
+        self.assertEqual(r2.status_code, 400)
+        self.assertIn("Offline limit exceeded", r2.get_json()["error"])
+
+        # Bank settles
+        r_sync = self.bank_client.post(
+            "/api/bank/sync_batch",
+            headers={"X-Merchant-Key": self.merchant_key},
+            json={"merchant_id": "merchant_bob@upi", "tokens": [token_pkg]}
+        )
+        receipt_pkg = r_sync.get_json()["receipts"][0]
+
+        # First reconcile succeeds and restores \u20b9500
+        r_recon1 = self.payer_client.post("/api/payer/reconcile", json={"receipt": receipt_pkg})
+        self.assertEqual(r_recon1.status_code, 200)
+        self.assertEqual(r_recon1.get_json()["remaining_allowance"], 500.0)
+
+        # Second reconcile of the SAME receipt is replay-protected
+        r_recon2 = self.payer_client.post("/api/payer/reconcile", json={"receipt": receipt_pkg})
+        self.assertEqual(r_recon2.status_code, 200)
+        data2 = r_recon2.get_json()
+        self.assertTrue(data2.get("already_reconciled"))
+        self.assertEqual(data2.get("restored_amount", 0.0), 0.0)
+        # Allowance must not exceed \u20b9500
+        r_stat = self.payer_client.get("/api/payer/status")
+        self.assertLessEqual(r_stat.get_json()["unsynced_spent"], 0.0)
+        self.assertLessEqual(r_stat.get_json()["remaining_allowance"], 500.0)
 
 
 if __name__ == "__main__":

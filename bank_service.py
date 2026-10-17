@@ -9,6 +9,7 @@ provisioning and transaction review APIs with admin and merchant authentication.
 
 import os
 import sys
+import hmac
 import socket
 import argparse
 import time
@@ -44,12 +45,19 @@ def create_bank_app(
     admin_token: Optional[str] = None,
     initial_network_online: bool = True
 ) -> Flask:
-    """Factory creating the Bank Service Flask application."""
+    """Factory creating the Bank Service Flask application.
+
+    Admin token resolution order (no hardcoded default):
+      1. 'admin_token' argument (use only in tests; never from CLI args).
+      2. BANK_ADMIN_TOKEN environment variable (required for production).
+    If neither is set, an empty-string admin token is used which will cause
+    all admin requests to fail — a safe default that requires explicit configuration.
+    """
     app = Flask(__name__, template_folder="templates", static_folder="static")
     backend = BackendServer(db_path=db_path)
 
-    # Load admin token from argument or environment variable
-    configured_admin_token = admin_token or os.getenv("BANK_ADMIN_TOKEN", "demo-admin-secret-2026")
+    # Resolve admin token: argument (test injection) then env var. No hardcoded default.
+    configured_admin_token = admin_token or os.getenv("BANK_ADMIN_TOKEN", "")
 
     # State
     state = {
@@ -61,13 +69,26 @@ def create_bank_app(
     app.config["BANK_STATE"] = state
 
     def check_admin_auth() -> bool:
-        """Verifies admin authorization token in request headers or body."""
-        token = request.headers.get("X-Admin-Token")
-        if not token and request.is_json:
-            token = (request.get_json(silent=True) or {}).get("admin_token")
+        """
+        Verifies the admin authorization token.
+
+        SECURITY:
+          - Token is accepted ONLY from the 'X-Admin-Token' request header.
+          - It is NEVER accepted from URL query parameters or JSON request bodies
+            to prevent secrets appearing in server access logs or process lists.
+          - Comparison is constant-time (hmac.compare_digest) to prevent timing attacks.
+          - If no admin token is configured (empty string), ALL admin requests are denied.
+        """
+        if not state["admin_token"]:
+            # No admin token configured — deny all admin requests safely.
+            return False
+        token = request.headers.get("X-Admin-Token", "")
         if not token:
-            token = request.args.get("admin_token")
-        return bool(token and token == state["admin_token"])
+            return False
+        return hmac.compare_digest(
+            token.encode("utf-8"),
+            state["admin_token"].encode("utf-8")
+        )
 
     def check_merchant_auth(merchant_id: str) -> bool:
         """Verifies merchant API key from request headers or body."""
@@ -386,10 +407,25 @@ def main():
     parser.add_argument("--host", default=os.getenv("BANK_HOST", "0.0.0.0"), help="Host address to bind (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=int(os.getenv("BANK_PORT", 5003)), help="Port to bind (default: 5003)")
     parser.add_argument("--db", default=os.getenv("BANK_DB", "offline_upi_backend.db"), help="SQLite database path")
-    parser.add_argument("--admin-token", default=os.getenv("BANK_ADMIN_TOKEN", "demo-admin-secret-2026"), help="Admin authentication token")
+    # SECURITY: admin token is NEVER accepted as a CLI argument (visible in process list).
+    # Set the BANK_ADMIN_TOKEN environment variable instead.
 
     args = parser.parse_args()
-    app = create_bank_app(db_path=args.db, admin_token=args.admin_token)
+
+    # Enforce explicit admin token configuration — no hardcoded fallback.
+    admin_token = os.getenv("BANK_ADMIN_TOKEN", "")
+    if not admin_token:
+        print(
+            "[FATAL] BANK_ADMIN_TOKEN environment variable is not set.\n"
+            "  Set it before starting the bank service:\n"
+            "    Windows:  set BANK_ADMIN_TOKEN=your-strong-random-token\n"
+            "    Linux/Mac: export BANK_ADMIN_TOKEN=your-strong-random-token\n"
+            "  DEMO ONLY: For the academic demo, use any non-empty token.",
+            file=sys.stderr
+        )
+        sys.exit(1)
+
+    app = create_bank_app(db_path=args.db, admin_token=admin_token)
 
     lan_ip = get_lan_ip()
     print("\n" + "=" * 80)

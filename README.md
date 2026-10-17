@@ -100,7 +100,20 @@ To test all three services running as separate processes on a single laptop:
 # 1. Install dependencies
 pip install -r requirements.txt
 
-# 2. Launch all three independent services
+# 2. Configure required environment variables (DEMO ONLY — use strong credentials in production)
+# Windows PowerShell:
+$env:PAYER_PASSPHRASE="demo-payer-passphrase"
+$env:BANK_ADMIN_TOKEN="demo-admin-secret-2026"
+
+# Windows CMD:
+set PAYER_PASSPHRASE=demo-payer-passphrase
+set BANK_ADMIN_TOKEN=demo-admin-secret-2026
+
+# Linux / macOS:
+export PAYER_PASSPHRASE=demo-payer-passphrase
+export BANK_ADMIN_TOKEN=demo-admin-secret-2026
+
+# 3. Launch all three independent services
 python run_all.py
 ```
 
@@ -121,7 +134,12 @@ Connect all three devices to the same local Wi-Fi router or phone mobile hotspot
 ### Step 2: Start Device 3 (Bank Service)
 On the computer acting as the Central Bank Switch:
 ```bash
-python bank_service.py --host 0.0.0.0 --port 5003 --admin-token bank-secret-2026
+# Set Bank Admin Token via environment variable (accepted via X-Admin-Token header only)
+export BANK_ADMIN_TOKEN=bank-secret-2026   # Linux/macOS
+# or: set BANK_ADMIN_TOKEN=bank-secret-2026 (Windows CMD)
+# or: $env:BANK_ADMIN_TOKEN="bank-secret-2026" (PowerShell)
+
+python bank_service.py --host 0.0.0.0 --port 5003
 ```
 Find the bank machine's LAN IP address printed in the terminal (e.g. `192.168.1.100`).
 
@@ -134,13 +152,22 @@ python merchant_service.py --host 0.0.0.0 --port 5002 --merchant-id merchant_bob
 ### Step 4: Start Device 1 (Customer Payer Device)
 On the smartphone or laptop acting as the Customer:
 ```bash
+# Set Payer Passphrase via environment variable (NEVER passed as CLI arg to protect process table)
+export PAYER_PASSPHRASE=my-secure-payer-passphrase   # Linux/macOS
+# or: set PAYER_PASSPHRASE=my-secure-payer-passphrase (Windows CMD)
+# or: $env:PAYER_PASSPHRASE="my-secure-payer-passphrase" (PowerShell)
+
+# Optional: Pin trusted bank public key directly via environment variable
+# export BANK_PUBLIC_KEY_PEM="$(cat bank_public_key.pem)"
+
 python payer_service.py --host 0.0.0.0 --port 5001 --payer-id alice@upi --offline-cap 500.0
 ```
 
 ### Step 5: Provision Trusted Public Keys
 Before offline transactions begin, provision the customer's public key into the merchant and bank registries:
 ```bash
-python provision_keys.py --payer-id alice@upi --merchant-url http://<MERCHANT_IP>:5002 --bank-url http://192.168.1.100:5003 --admin-token bank-secret-2026
+# Supply admin token via header (BANK_ADMIN_TOKEN env var is used automatically by provision_keys.py)
+python provision_keys.py --payer-id alice@upi --merchant-url http://<MERCHANT_IP>:5002 --bank-url http://192.168.1.100:5003
 ```
 *(If all devices share a filesystem or USB drive, you can also run `python provision_keys.py` locally on the databases).*
 
@@ -196,27 +223,23 @@ This project includes production-grade security patterns adapted for local acade
 
 ### 1. Protected Payer Private-Key Storage (PBKDF2-HMAC-SHA256 + AES-256-GCM)
 - **Zero Plaintext Key Storage:** Private-key PEM bytes are never written to disk unencrypted.
-- **Key Derivation:** A 256-bit AES key is derived from a user-supplied passphrase using PBKDF2-HMAC-SHA256 with a unique 16-byte cryptographically secure random salt and **100,000 iterations**.
+- **Key Derivation:** A 256-bit AES key is derived from an operator-supplied passphrase using PBKDF2-HMAC-SHA256 with a unique 16-byte cryptographically secure random salt and **100,000 iterations**.
 - **Authenticated Encryption:** Key material is encrypted with AES-256 in Galois/Counter Mode (GCM) using a unique 12-byte nonce, guaranteeing confidentiality and integrity against offline tampering.
-- **No Hardcoded Passphrases:** The passphrase must be supplied via the `--passphrase` flag or the `PAYER_PASSPHRASE` environment variable. If an invalid passphrase is provided, the service fails safely without corrupting or leaking keys.
-- **Academic Limitation Note:** This software-based encrypted keystore simulates secure storage on portable systems. In a production mobile operating system (Android / iOS), private keys must be hardware-bound within a Secure Enclave or StrongBox Hardware Security Module (HSM), ensuring keys cannot be extracted even with root privileges.
+- **No Insecure Passphrase Defaults:** Payer state initialization and decryption require an explicit passphrase via `PAYER_PASSPHRASE`. Passphrases are never passed through CLI arguments (avoiding process table exposure). If an existing encrypted state cannot be decrypted, execution halts safely without creating a new identity or leaking secrets.
+- **Academic Limitation Note:** In a production mobile OS (Android / iOS), private keys must be hardware-bound within a Secure Enclave or StrongBox Hardware Security Module (HSM).
 
-### 2. Token Lifecycle, Export Lock & Bank-Signed Reconciliation
-To prevent payers from maliciously or mistakenly reclaiming offline spending allowance:
-- **Strict State Lifecycle:**
-  $$\text{CREATED} \longrightarrow \text{EXPORTED} \longrightarrow \text{SETTLED}$$
-  $$\text{CREATED} \longrightarrow \text{CANCELLED} \quad (\text{Only prior to export})$$
-- **Export Locking:** The moment a token is exported (downloaded as JSON, rendered as QR, or copied), its status transitions to `EXPORTED`. Once exported, `POST /api/payer/cancel` is strictly rejected.
-- **Authoritative Bank Receipts:** Offline spending allowance (up to ₹500.00 / 50,000 paise) can **only** be restored by submitting a verifiable, cryptographically signed Bank Settlement Receipt (`POST /api/payer/reconcile`).
-- **Cryptographic Verification of Receipts:** The payer validates the Bank's RSA-PSS digital signature over the canonical receipt payload (`receiptID`, `tokenID`, `payerID`, `payeeID`, `amount`, `status`, `settled_at`). Tampered amounts, mismatched payer IDs, forged signatures, or arbitrary token IDs are rejected with HTTP 400.
+### 2. Pinned Bank Public Key & Cryptographic Receipt Verification
+- **Pinned Trust Anchor:** The Payer device loads the Bank's authoritative public key from trusted local configuration or authenticated provisioning (`BANK_PUBLIC_KEY_PEM`).
+- **Zero Trust for Receipt-Embedded Keys:** The Payer **never** accepts a public key embedded inside a receipt package as a trust anchor. Any `bank_public_key` field in untrusted input is discarded.
+- **Strict Signature Verification:** Allowance restoration requires valid RSA-PSS signatures computed with the trusted bank key. Forged receipts signed with attacker-generated key pairs are strictly rejected.
+- **Legacy Bypass Elimination:** The unauthenticated `settled_token_ids` HTTP path has been removed from `payer_service.py`. No endpoint allows restoring balance or resetting offline spend without verifiable bank signatures.
+- **Replay Protection & Cap Integrity:** Replaying valid receipts is idempotent (restores 0 additional allowance), and total restored allowance cannot exceed the ₹500.00 offline cap.
 
 ### 3. Authoritative Bank Public-Key Registry & Admin Protection
 - **Authoritative Registry:** The Bank serves as the central trust anchor. Registered public keys are stored in the `trusted_payers` SQLite table.
-- **Administrative Authentication:** All registry mutations (registration, replacement) require an administrator bearer token passed via the `X-Admin-Token` header (configured via `--admin-token` or `BANK_ADMIN_TOKEN`).
-- **Key Replacement Protection:** Attempting to overwrite an existing registered payer key is rejected by default to prevent key-substitution attacks.
-- **Public-Key Validation:** Before registration, keys are validated to ensure they are well-formed RSA public keys with a minimum modulus size of 2048 bits. Weak or non-RSA keys are rejected.
-- **Audit Logging:** Every administrative action is logged to the `admin_audit_log` SQLite table with action type, target ID, details, and timestamp.
-- **Merchant Key Sync:** The Merchant POS does not act as a public registry; it fetches trusted payer public keys directly from the authoritative Bank switch via `POST /api/merchant/sync_trusted_payers` using authenticated merchant credentials.
+- **Header-Only Administrator Authentication:** All administrative actions (`register_payer`, `register_merchant`, `toggle_network`, `simulate_duplicate`) strictly require the `X-Admin-Token` HTTP header. Tokens in query strings or JSON request bodies are explicitly rejected.
+- **Constant-Time Verification:** Tokens are verified using `hmac.compare_digest` to prevent side-channel timing attacks.
+- **Mandatory Admin Token:** `BANK_ADMIN_TOKEN` must be explicitly configured; unauthenticated administrative access is blocked with HTTP 401.
 
 ### 4. Authenticated Merchant-to-Bank Synchronization
 - **API Key Authentication:** Each authorized merchant is provisioned with a secret API key. The Bank stores a salted SHA-256 hash of each merchant key in the `authorized_merchants` table.
@@ -276,21 +299,22 @@ To prevent payers from maliciously or mistakenly reclaiming offline spending all
 
 ## ⚙️ Environment Variables & Configuration
 
-| Variable | Target Service | Default (Demo) | Description |
-| :--- | :--- | :--- | :--- |
-| `PAYER_PASSPHRASE` | Payer (:5001) | `demo-payer-passphrase` | Passphrase used to derive AES-256-GCM key for encrypted key store. |
-| `PAYER_ID` | Payer (:5001) | `alice@upi` | Virtual Payment Address (VPA) of the customer. |
-| `PAYER_OFFLINE_CAP` | Payer (:5001) | `500.0` | Maximum cumulative offline allowance (INR). |
-| `MERCHANT_ID` | Merchant (:5002) | `merchant_bob@upi` | Registered Merchant VPA. |
-| `MERCHANT_API_KEY` | Merchant & Bank | `merchant-bob-secret-key-2026` | Shared secret key for merchant batch synchronization. |
-| `BANK_URL` | Merchant (:5002) | `http://127.0.0.1:5003` | Target Bank Switch base URL. |
-| `BANK_ADMIN_TOKEN` | Bank (:5003) | `demo-admin-secret-2026` | Secret token required for administrative endpoints. |
+| Variable | Target Service | Required | Description |
+| :--- | :--- | :---: | :--- |
+| `PAYER_PASSPHRASE` | Payer (:5001) | **Yes** | Passphrase used to derive AES-256-GCM key for encrypted key store. No insecure defaults. Never passed via CLI arguments. |
+| `BANK_ADMIN_TOKEN` | Bank (:5003) | **Yes** | Secret administrator token. Required on all administrative endpoints via `X-Admin-Token` header. No insecure defaults. |
+| `BANK_PUBLIC_KEY_PEM` | Payer (:5001) | Optional | Authoritative PEM public key of the Bank. When pinned, Payer verifies bank receipts exclusively against this key. |
+| `PAYER_ID` | Payer (:5001) | No (default: `alice@upi`) | Virtual Payment Address (VPA) of the customer. |
+| `PAYER_OFFLINE_CAP` | Payer (:5001) | No (default: `500.0`) | Maximum cumulative offline allowance (INR). |
+| `MERCHANT_ID` | Merchant (:5002) | No (default: `merchant_bob@upi`) | Registered Merchant VPA. |
+| `MERCHANT_API_KEY` | Merchant & Bank | No (default: demo key) | Shared secret key for merchant batch synchronization (`X-Merchant-Key`). |
+| `BANK_URL` | Merchant (:5002) | No (default: `:5003`) | Target Bank Switch base URL. |
 
-> **Security Warning:** The default demo credentials are provided solely for rapid local academic evaluation. In any multi-user deployment, override these via environment variables or CLI flags (`--admin-token`, `--merchant-api-key`, `--passphrase`).
+> **Security Requirement:** `PAYER_PASSPHRASE` and `BANK_ADMIN_TOKEN` have no silent fallback defaults in standard execution. Any demo values in example scripts are strictly for automated testing and must be set via local environment variables.
 
 ---
 
-## 🧪 Comprehensive Automated Test Suite (58 Tests)
+## 🧪 Comprehensive Automated Test Suite (70 Tests)
 
 Execute the full automated test suite using standard Python `unittest`:
 
@@ -301,14 +325,14 @@ python -m unittest discover -v -p "test_*.py"
 ### Verified Test Execution Summary
 
 ```
-Ran 58 tests in 20.375s
+Ran 70 tests in 22.744s
 
-OK (58 Passed, 0 Failed, 0 Skipped)
+OK (70 Passed, 0 Failed, 0 Skipped)
 ```
 
 | Test File | Tests | Focus Area & Verified Guarantees |
 | :--- | :---: | :--- |
-| **`test_services.py`** | 29 | **Service Architecture & Security Hardening**: Key isolation, PBKDF2/AES-GCM encrypted state verification, integer paise cap (₹500.00 vs ₹500.01), export lock preventing cancellation, Bank-signed receipt reconciliation, forged receipt rejection, merchant API key authentication, admin token protection, key replacement prevention, queue inspection, transaction/receipt query endpoints, concurrent duplicate submission isolation, and controlled JSON error handling. |
+| **`test_services.py`** | 41 | **Independent Services & Security Regression**: Pinned bank public key enforcement, attacker forged receipt rejection with embedded key, missing bank key safe failure, legacy `settled_token_ids` bypass removal, unauthenticated balance reset rejection, plaintext key state absence verification, passphrase requirement enforcement, header-only `X-Admin-Token` rejection in query/body, constant-time `hmac.compare_digest` auth, partial reconciliation with multi-token reservations, ₹500.00 cap and duplicate-settlement replay protection, thread-safe batch settlement with SQLite savepoints, and full REST API verification. |
 | **`test_offline_upi.py`** | 21 | **Core Domain & Cryptography**: RSA-PSS signatures, payee binding, NaN/infinity/negative amount rejects, tamper detection, attacker forged keypair rejection, SQLite queue persistence across reboot, and atomic SAVEPOINT duplicate defense. |
 | **`test_app.py`** | 7 | **Web Dashboards & Routes**: Portal rendering, dashboard status routes, LAN IP auto-discovery, interactive simulation controls, and idempotent key initialization. |
 | **`test_three_device_integration.py`** | 1 | **Live Multi-Process 3-Device Lifecycle (11 Phases)**: Completely terminates Bank process (`taskkill`), generates signed token offline on Payer, terminates Payer, verifies & queues offline on Merchant, reboots Merchant terminal (verifies SQLite queue persistence), verifies graceful 503 during bank outage, restarts Bank process, performs authenticated LAN sync, verifies 100% duplicate rejection on replay, queries signed receipt, and authoritatively reconciles Payer allowance back to ₹500.00. |
