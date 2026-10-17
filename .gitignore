@@ -6,12 +6,28 @@ __pycache__/
 # SQLite databases generated during runtime
 *.db
 *.db-journal
+*.sqlite
+*.sqlite3
 
-# Runtime payer state files
+# Runtime payer and merchant state files and private keys
 payer_state_*.json
+*state*.json
+*.pem
+*.key
+*.secret
 
-# Environment
+# Environment and credentials
+.env
+.env.*
+*.env
+credentials.json
+
+# Logs
+*.log
+
+# Virtual environments
 .venv/
 env/
 venv/
 .DS_Store
+

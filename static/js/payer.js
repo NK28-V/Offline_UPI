@@ -164,10 +164,17 @@ function displayTokenHandoff(tokenPkg) {
 
 function downloadTokenJson() {
   if (!currentTokenPackage) return;
+  const tid = currentTokenPackage.payload.tokenID;
+  fetch("/api/payer/export", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token_id: tid })
+  }).then(() => loadPayerStatus()).catch(() => {});
+
   const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(currentTokenPackage, null, 2));
   const downloadAnchor = document.createElement("a");
   downloadAnchor.setAttribute("href", dataStr);
-  downloadAnchor.setAttribute("download", `offline_token_${currentTokenPackage.payload.tokenID.slice(0, 8)}.json`);
+  downloadAnchor.setAttribute("download", `offline_token_${tid.slice(0, 8)}.json`);
   document.body.appendChild(downloadAnchor);
   downloadAnchor.click();
   downloadAnchor.remove();
@@ -175,6 +182,13 @@ function downloadTokenJson() {
 
 function copyTokenJson() {
   if (!currentTokenPackage) return;
+  const tid = currentTokenPackage.payload.tokenID;
+  fetch("/api/payer/export", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token_id: tid })
+  }).then(() => loadPayerStatus()).catch(() => {});
+
   const jsonStr = JSON.stringify(currentTokenPackage, null, 2);
   navigator.clipboard.writeText(jsonStr).then(() => {
     const indicator = document.getElementById("copy-success-indicator");
@@ -193,12 +207,15 @@ function renderPayerTransactions(txList) {
   tbody.innerHTML = txList.map(tx => {
     const statusBadgeClass =
       tx.status === "SETTLED" ? "badge-settled" :
-      tx.status === "OUTSTANDING" ? "badge-pending" :
-      tx.status === "CANCELLED" ? "badge-rejected" : "badge-created";
+      tx.status === "EXPORTED" ? "badge-pending" :
+      tx.status === "CREATED" ? "badge-created" :
+      tx.status === "CANCELLED" ? "badge-rejected" : "badge-pending";
 
-    const isOutstanding = tx.status === "OUTSTANDING";
-    const actionBtn = isOutstanding
+    const isCancellable = tx.status === "CREATED";
+    const actionBtn = isCancellable
       ? `<button class="btn btn-outline btn-sm" style="color:var(--danger);" onclick="cancelToken('${tx.token_id}')">Cancel</button>`
+      : tx.status === "EXPORTED"
+      ? `<span style="font-size:0.75rem;color:var(--text-muted); font-style:italic;" title="Reservation locked until bank settlement">Locked (In Transit)</span>`
       : `<span style="font-size:0.75rem;color:var(--text-muted);">&mdash;</span>`;
 
     const timeFormatted = new Date(tx.timestamp * 1000).toLocaleTimeString();
