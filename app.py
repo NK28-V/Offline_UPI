@@ -16,6 +16,8 @@ from payer import PayerDevice, OfflineSpendLimitExceededError
 from merchant import MerchantDevice
 from backend import BackendServer
 from crypto_utils import sign_payload
+from reset_demo import reset_all_demo_data
+from sample_data import load_sample_demo_data
 
 app = Flask(__name__)
 
@@ -75,6 +77,38 @@ def merchant_dashboard():
 @app.route("/bank")
 def bank_dashboard():
     return render_template("bank.html")
+
+
+@app.after_request
+def apply_cors(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, PUT, DELETE"
+    return response
+
+
+# =========================================================================
+# Demo Reset & Sample Data APIs
+# =========================================================================
+
+@app.route("/api/reset_demo", methods=["POST"])
+def reset_demo():
+    report = reset_all_demo_data(PAYER_STATE_FILE, MERCHANT_DB_FILE, BACKEND_DB_FILE)
+    # Reload in-memory objects
+    global payer, merchant, backend
+    payer = PayerDevice(payer_id="alice@upi", offline_cap=500.0, state_file=PAYER_STATE_FILE)
+    merchant = MerchantDevice(merchant_id="merchant_bob@upi", queue_db_path=MERCHANT_DB_FILE)
+    backend = BackendServer(db_path=BACKEND_DB_FILE)
+    merchant.register_payer(payer.payer_id, payer.public_key_pem)
+    backend.register_payer(payer.payer_id, payer.public_key_pem)
+    return jsonify(report), 200
+
+
+@app.route("/api/load_sample_data", methods=["POST"])
+def load_sample_data():
+    report = load_sample_demo_data(payer_state_file=PAYER_STATE_FILE, merchant_db=MERCHANT_DB_FILE, bank_db=BACKEND_DB_FILE)
+    payer._load_state()
+    return jsonify(report), 200
 
 
 # =========================================================================
@@ -281,7 +315,10 @@ def get_bank_status():
     audit_sums = cursor.fetchone()
     duplicate_count = audit_sums["d"] or 0
     rejected_count = audit_sums["r"] or 0
-    total_received = audit_sums["t"] or 0
+    # Merchant pending queue summary
+    m_summary = merchant.summary()
+    pending_merchant_syncs = m_summary["pending_sync"]
+    pending_merchant_amount = m_summary["pending_sync_amount"]
 
     return jsonify({
         "network_online": network_online,
@@ -291,10 +328,18 @@ def get_bank_status():
         "flagged_count": flagged_count,
         "rejected_count": rejected_count,
         "total_received": total_received,
+        "pending_merchant_syncs": pending_merchant_syncs,
+        "pending_merchant_amount": round(pending_merchant_amount, 2),
+        "merchant_reachable": True,
         "trusted_payers": trusted_payers,
         "recent_batches": batches,
         "ledger": ledger
     })
+
+
+@app.route("/api/bank/trigger_merchant_sync", methods=["POST"])
+def trigger_merchant_sync():
+    return sync_merchant_with_bank()
 
 
 @app.route("/api/bank/toggle_network", methods=["POST"])

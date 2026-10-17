@@ -1,5 +1,5 @@
 /**
- * Payer Device Dashboard JavaScript
+ * Offline UPI Payment Simulator — Payer Device Dashboard Controller
  * Handles offline token generation, QR rendering, spend allowance tracking,
  * and token cancellation.
  */
@@ -8,9 +8,16 @@ let currentTokenPackage = null;
 let qrcodeInstance = null;
 
 document.addEventListener("DOMContentLoaded", () => {
+  // Initialize shared common components
+  if (window.OfflineUPI) {
+    window.OfflineUPI.initNavigation("payer");
+    window.OfflineUPI.initDemoGuide();
+    window.OfflineUPI.initResetModal(loadPayerStatus);
+  }
+
   loadPayerStatus();
 
-  // Setup form submission
+  // Setup payment form submission
   const paymentForm = document.getElementById("payment-form");
   if (paymentForm) {
     paymentForm.addEventListener("submit", handleGeneratePayment);
@@ -42,11 +49,15 @@ async function loadPayerStatus() {
     const data = await res.json();
 
     // Update balances
-    document.getElementById("payer-name").innerText = data.payer_name || "Alice";
-    document.getElementById("payer-id-display").innerText = data.payer_id;
-    document.getElementById("allowance-display").innerText = `₹${data.remaining_allowance.toFixed(2)}`;
-    document.getElementById("unsynced-display").innerText = `₹${data.unsynced_spent.toFixed(2)}`;
-    document.getElementById("outstanding-count-display").innerText = data.outstanding_count;
+    const nameEl = document.getElementById("payer-name");
+    if (nameEl) nameEl.innerText = data.payer_name || "Alice";
+
+    const idEl = document.getElementById("payer-id-display");
+    if (idEl) idEl.innerText = data.payer_id || "alice@upi";
+
+    document.getElementById("allowance-display").innerText = `₹${(data.remaining_allowance || 0).toFixed(2)}`;
+    document.getElementById("unsynced-display").innerText = `₹${(data.unsynced_spent || 0).toFixed(2)}`;
+    document.getElementById("outstanding-count-display").innerText = data.outstanding_count || 0;
 
     // Progress bar calculations
     const cap = data.offline_cap || 500.0;
@@ -54,27 +65,36 @@ async function loadPayerStatus() {
     const percentage = Math.min(100, Math.round((spent / cap) * 100));
 
     const progressFill = document.getElementById("spend-progress-fill");
-    progressFill.style.width = `${percentage}%`;
-    progressFill.className = "progress-bar-fill";
-    if (spent >= cap) {
-      progressFill.classList.add("danger");
-    } else if (spent >= cap * 0.8) {
-      progressFill.classList.add("warning");
+    if (progressFill) {
+      progressFill.style.width = `${percentage}%`;
+      progressFill.className = "progress-bar-fill";
+      if (spent >= cap) {
+        progressFill.classList.add("danger");
+      } else if (spent >= cap * 0.8) {
+        progressFill.classList.add("warning");
+      }
     }
 
-    document.getElementById("spend-ratio-text").innerText = `₹${spent.toFixed(2)} / ₹${cap.toFixed(2)} (${percentage}%)`;
+    const spendRatioText = document.getElementById("spend-ratio-text");
+    if (spendRatioText) {
+      spendRatioText.innerText = `₹${spent.toFixed(2)} / ₹${cap.toFixed(2)} (${percentage}%)`;
+    }
 
     // Limit warning banner
     const warningBanner = document.getElementById("limit-warning-banner");
     const btnGenerate = document.getElementById("btn-generate");
     if (spent >= cap) {
-      warningBanner.style.display = "block";
-      btnGenerate.disabled = true;
-      btnGenerate.innerText = "🛑 Offline Spend Limit (₹500) Reached";
+      if (warningBanner) warningBanner.style.display = "block";
+      if (btnGenerate) {
+        btnGenerate.disabled = true;
+        btnGenerate.innerText = "🛑 Offline Spend Limit (₹500.00) Reached";
+      }
     } else {
-      warningBanner.style.display = "none";
-      btnGenerate.disabled = false;
-      btnGenerate.innerText = "🔒 Generate & Sign Offline Token";
+      if (warningBanner) warningBanner.style.display = "none";
+      if (btnGenerate) {
+        btnGenerate.disabled = false;
+        btnGenerate.innerText = "🔒 Generate & Sign Offline Token";
+      }
     }
 
     // Render transactions table
@@ -87,7 +107,7 @@ async function loadPayerStatus() {
 async function handleGeneratePayment(e) {
   e.preventDefault();
   const errorBox = document.getElementById("form-error-msg");
-  errorBox.style.display = "none";
+  if (errorBox) errorBox.style.display = "none";
 
   const payeeId = document.getElementById("payee-id-input").value.trim();
   const amount = parseFloat(document.getElementById("amount-input").value);
@@ -100,6 +120,12 @@ async function handleGeneratePayment(e) {
   if (isNaN(amount) || amount <= 0) {
     showError("Please enter a positive numeric amount.");
     return;
+  }
+
+  const btnGenerate = document.getElementById("btn-generate");
+  if (btnGenerate) {
+    btnGenerate.disabled = true;
+    btnGenerate.innerHTML = "⏳ Signing Token with RSA-2048...";
   }
 
   try {
@@ -126,6 +152,11 @@ async function handleGeneratePayment(e) {
     loadPayerStatus();
   } catch (err) {
     showError("Network/Server error: " + err.message);
+  } finally {
+    if (btnGenerate) {
+      btnGenerate.disabled = false;
+      btnGenerate.innerText = "🔒 Generate & Sign Offline Token";
+    }
   }
 }
 
@@ -134,9 +165,9 @@ function displayTokenHandoff(tokenPkg) {
   const detailsBox = document.getElementById("token-details-box");
   const badge = document.getElementById("handoff-status-badge");
 
-  placeholder.style.display = "none";
-  detailsBox.style.display = "block";
-  badge.style.display = "inline-block";
+  if (placeholder) placeholder.style.display = "none";
+  if (detailsBox) detailsBox.style.display = "block";
+  if (badge) badge.style.display = "inline-block";
 
   const payload = tokenPkg.payload;
   document.getElementById("token-id-text").innerText = payload.tokenID;
@@ -146,19 +177,21 @@ function displayTokenHandoff(tokenPkg) {
 
   // Generate QR Code
   const qrContainer = document.getElementById("qrcode");
-  qrContainer.innerHTML = "";
-  try {
-    const jsonStr = JSON.stringify(tokenPkg);
-    qrcodeInstance = new QRCode(qrContainer, {
-      text: jsonStr,
-      width: 180,
-      height: 180,
-      colorDark: "#0f172a",
-      colorLight: "#ffffff",
-      correctLevel: QRCode.CorrectLevel.M
-    });
-  } catch (qrErr) {
-    qrContainer.innerHTML = `<p style="font-size:0.8rem;color:var(--text-muted);">QR rendering fallback: Use JSON download or copy below.</p>`;
+  if (qrContainer) {
+    qrContainer.innerHTML = "";
+    try {
+      const jsonStr = JSON.stringify(tokenPkg);
+      qrcodeInstance = new QRCode(qrContainer, {
+        text: jsonStr,
+        width: 180,
+        height: 180,
+        colorDark: "#0f172a",
+        colorLight: "#ffffff",
+        correctLevel: QRCode.CorrectLevel.M
+      });
+    } catch (qrErr) {
+      qrContainer.innerHTML = `<p style="font-size:0.8rem;color:var(--text-muted);">QR rendering fallback: Use JSON download or copy below.</p>`;
+    }
   }
 }
 
@@ -192,17 +225,25 @@ function copyTokenJson() {
   const jsonStr = JSON.stringify(currentTokenPackage, null, 2);
   navigator.clipboard.writeText(jsonStr).then(() => {
     const indicator = document.getElementById("copy-success-indicator");
-    indicator.style.display = "block";
-    setTimeout(() => { indicator.style.display = "none"; }, 3000);
+    if (indicator) {
+      indicator.style.display = "block";
+      setTimeout(() => { indicator.style.display = "none"; }, 3500);
+    }
   });
 }
 
 function renderPayerTransactions(txList) {
   const tbody = document.getElementById("payer-transactions-tbody");
+  const emptyState = document.getElementById("payer-empty-state");
+  if (!tbody) return;
+
   if (!txList || txList.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 20px;">No offline payments recorded yet.</td></tr>`;
+    tbody.innerHTML = "";
+    if (emptyState) emptyState.style.display = "block";
     return;
   }
+
+  if (emptyState) emptyState.style.display = "none";
 
   tbody.innerHTML = txList.map(tx => {
     const statusBadgeClass =
@@ -213,18 +254,19 @@ function renderPayerTransactions(txList) {
 
     const isCancellable = tx.status === "CREATED";
     const actionBtn = isCancellable
-      ? `<button class="btn btn-outline btn-sm" style="color:var(--danger);" onclick="cancelToken('${tx.token_id}')">Cancel</button>`
+      ? `<button class="btn btn-outline btn-sm" style="color:var(--danger); border-color:var(--danger-border); padding: 2px 8px;" onclick="cancelToken('${tx.token_id}')">Cancel</button>`
       : tx.status === "EXPORTED"
       ? `<span style="font-size:0.75rem;color:var(--text-muted); font-style:italic;" title="Reservation locked until bank settlement">Locked (In Transit)</span>`
       : `<span style="font-size:0.75rem;color:var(--text-muted);">&mdash;</span>`;
 
-    const timeFormatted = new Date(tx.timestamp * 1000).toLocaleTimeString();
+    const timeFormatted = tx.timestamp ? new Date(tx.timestamp * 1000).toLocaleTimeString() : "N/A";
+    const shortId = tx.token_id ? tx.token_id.slice(0, 8) : "—";
 
     return `
       <tr>
-        <td><span class="token-code">${tx.token_id.slice(0, 8)}...</span></td>
-        <td>${tx.payee_id}</td>
-        <td><strong>₹${tx.amount.toFixed(2)}</strong></td>
+        <td><span class="token-code" title="${tx.token_id}">${shortId}...</span></td>
+        <td><code>${tx.payee_id}</code></td>
+        <td><strong style="color: var(--text-primary);">₹${tx.amount.toFixed(2)}</strong></td>
         <td>${timeFormatted}</td>
         <td><span class="badge ${statusBadgeClass}">${tx.status}</span></td>
         <td>${actionBtn}</td>
@@ -234,7 +276,7 @@ function renderPayerTransactions(txList) {
 }
 
 async function cancelToken(tokenId) {
-  if (!confirm(`Cancel this outstanding token and restore its amount to your offline allowance?`)) {
+  if (!confirm(`Cancel this un-exported token and restore its amount to your offline allowance?`)) {
     return;
   }
 
@@ -257,6 +299,7 @@ async function cancelToken(tokenId) {
 
 function showError(msg) {
   const errorBox = document.getElementById("form-error-msg");
+  if (!errorBox) return;
   errorBox.innerText = msg;
   errorBox.style.display = "block";
 }

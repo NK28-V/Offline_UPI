@@ -566,3 +566,336 @@ textarea.form-control {
   color: var(--text-muted);
   font-size: 0.85rem;
 }
+
+/* ==========================================================================
+   UI / UX Redesign Components: Stepper, Modals, Empty States, Lifecycle Cards
+   ========================================================================== */
+
+/* Navbar Actions */
+.navbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.btn-reset-nav {
+  color: var(--danger);
+  border-color: var(--danger-border);
+  background: transparent;
+  font-size: 0.82rem;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  transition: all 0.2s ease;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn-reset-nav:hover {
+  background: var(--danger-bg);
+  border-color: var(--danger);
+}
+
+.btn-guide-nav {
+  color: var(--primary);
+  border-color: var(--primary);
+  background: var(--primary-subtle);
+  font-size: 0.82rem;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+
+.btn-guide-nav:hover, .btn-guide-nav.active {
+  background: var(--primary);
+  color: #fff;
+}
+
+/* Guided Demo Stepper Panel */
+.demo-guide-card {
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-left: 5px solid var(--primary);
+  border-radius: var(--radius-md);
+  padding: 20px 24px;
+  margin-bottom: 24px;
+  box-shadow: var(--shadow-md);
+  position: relative;
+  animation: slideDown 0.25s ease-out;
+}
+
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.demo-guide-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.demo-guide-title {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.demo-stepper-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.demo-step-item {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  position: relative;
+}
+
+.demo-step-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  background: var(--primary);
+  color: #ffffff;
+  border-radius: 50%;
+  font-size: 0.75rem;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.demo-step-title {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.demo-step-desc {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.demo-outage-note {
+  margin-top: 14px;
+  padding: 10px 14px;
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius-sm);
+  font-size: 0.82rem;
+  color: #92400e;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Empty State Cards */
+.empty-state-box {
+  text-align: center;
+  padding: 40px 24px;
+  color: var(--text-secondary);
+}
+
+.empty-state-icon {
+  font-size: 2.5rem;
+  margin-bottom: 12px;
+  opacity: 0.85;
+}
+
+.empty-state-heading {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+
+.empty-state-text {
+  font-size: 0.88rem;
+  color: var(--text-secondary);
+  max-width: 480px;
+  margin: 0 auto 16px;
+  line-height: 1.5;
+}
+
+.empty-state-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Modal Dialog */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(15, 23, 42, 0.6);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 20px;
+}
+
+.modal-card {
+  background: #ffffff;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  max-width: 520px;
+  width: 100%;
+  padding: 24px;
+  position: relative;
+  animation: modalPop 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes modalPop {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.modal-title {
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.modal-body {
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin-bottom: 20px;
+}
+
+.modal-body ul {
+  padding-left: 20px;
+  margin: 10px 0;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+/* Filter Pill Group */
+.filter-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.filter-pill {
+  padding: 4px 12px;
+  border-radius: var(--radius-full);
+  font-size: 0.8rem;
+  font-weight: 600;
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.filter-pill:hover {
+  background: #e2e8f0;
+  color: var(--text-primary);
+}
+
+.filter-pill.active {
+  background: var(--primary);
+  color: #ffffff;
+  border-color: var(--primary);
+}
+
+/* Settlement Lifecycle Cards */
+.lifecycle-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+  margin-bottom: 20px;
+}
+
+.lifecycle-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: 14px;
+  border-top: 3px solid var(--border-color);
+}
+
+.lifecycle-card.stage-received { border-top-color: var(--info); }
+.lifecycle-card.stage-verified { border-top-color: var(--warning); }
+.lifecycle-card.stage-settled { border-top-color: var(--success); }
+.lifecycle-card.stage-rejected { border-top-color: var(--danger); }
+
+.lifecycle-badge {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+  display: inline-block;
+}
+
+.lifecycle-title {
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.lifecycle-desc {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+/* Collapsible Section */
+.collapsible-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  user-select: none;
+}
+
+.collapsible-header:hover {
+  opacity: 0.85;
+}
+
+.chevron-icon {
+  transition: transform 0.2s ease;
+}
+
+.collapsible-header.open .chevron-icon {
+  transform: rotate(180deg);
+}
+

@@ -23,6 +23,8 @@ if sys.platform == "win32":
         pass
 
 from merchant import MerchantDevice
+from reset_demo import reset_merchant_db, reset_all_demo_data
+from sample_data import load_sample_demo_data
 
 
 def get_lan_ip() -> str:
@@ -77,6 +79,16 @@ def create_merchant_app(
             return False
 
     # -------------------------------------------------------------------------
+    # CORS & Cross-Origin Headers for Multi-Port LAN Simulation
+    # -------------------------------------------------------------------------
+    @app.after_request
+    def apply_cors(response):
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, PUT, DELETE"
+        return response
+
+    # -------------------------------------------------------------------------
     # HTML Dashboard Routes & Smart Cross-Service Navigation
     # -------------------------------------------------------------------------
     @app.route("/")
@@ -97,6 +109,22 @@ def create_merchant_app(
     @app.route("/health", methods=["GET"])
     def health():
         return jsonify({"status": "ok", "service": "merchant"}), 200
+
+    @app.route("/api/reset_demo", methods=["POST"])
+    def reset_demo():
+        """Resets disposable demo records while preserving keys, registries, and accounts."""
+        local_only = request.args.get("local_only", "false").lower() == "true"
+        if local_only:
+            report = reset_merchant_db(state["db_path"])
+        else:
+            report = reset_all_demo_data(merchant_db=state["db_path"])
+        return jsonify(report), 200
+
+    @app.route("/api/load_sample_data", methods=["POST"])
+    def load_sample_data():
+        """Loads sample demo records on explicit user action."""
+        report = load_sample_demo_data(merchant_db=state["db_path"])
+        return jsonify(report), 200
 
     # -------------------------------------------------------------------------
     # System Info API

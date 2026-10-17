@@ -3,145 +3,225 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Payer Dashboard — Offline UPI Customer Device</title>
+  <title>Payer Dashboard — Offline UPI Payment Simulator</title>
   <link rel="stylesheet" href="/static/css/style.css">
   <script src="/static/js/qrcode.min.js"></script>
 </head>
 <body>
+  <!-- Top Navigation Bar -->
   <header class="navbar">
     <a href="/" class="brand">
-      <span>Offline UPI Core Simulation</span>
-      <span class="brand-badge">Payer Device</span>
+      <span>Offline UPI Payment Simulator</span>
+      <span class="brand-badge" style="background: var(--primary);">Payer Device</span>
     </a>
     <nav class="nav-links">
-      <a href="/payer" class="nav-link active">Payer Device</a>
-      <a href="/merchant" class="nav-link">Merchant Device</a>
-      <a href="/bank" class="nav-link">Bank Network</a>
+      <a href="/payer" class="nav-link active" data-role="payer">📱 Payer Dashboard</a>
+      <a href="/merchant" class="nav-link" data-role="merchant">🏪 Merchant Dashboard</a>
+      <a href="/bank" class="nav-link" data-role="bank">🏦 Bank Dashboard</a>
     </nav>
+    <div class="navbar-actions">
+      <button class="btn-guide-nav" id="btn-toggle-demo-guide" type="button" aria-expanded="false">
+        📖 How to Run a Demo
+      </button>
+      <button class="btn-reset-nav" id="btn-open-reset-modal" type="button">
+        🔄 Reset Demo Data
+      </button>
+    </div>
   </header>
 
   <main class="app-container">
+    <!-- Persistent Guided Demo Stepper Panel (Collapsible) -->
+    <div class="demo-guide-card" id="demo-guide-panel" style="display: none;">
+      <div class="demo-guide-header">
+        <div class="demo-guide-title">
+          <span>🚀 Interactive Demo Workflow — Step 1: Payer Offline Token Generation</span>
+        </div>
+        <button type="button" class="btn btn-outline btn-sm" id="btn-close-demo-guide">✕ Close Guide</button>
+      </div>
+      <p style="font-size: 0.88rem; color: var(--text-secondary); margin-bottom: 8px;">
+        Follow these steps to create, transfer, and settle an offline payment:
+      </p>
+      <div class="demo-stepper-grid">
+        <div class="demo-step-item" style="border: 2px solid var(--primary); background: var(--primary-subtle);">
+          <div class="demo-step-number">1</div>
+          <div class="demo-step-title">Generate Payment (Here)</div>
+          <div class="demo-step-desc">Enter amount (up to ₹500.00 cap) and click <strong>Generate &amp; Sign Offline Token</strong>. Signed locally with RSA-2048.</div>
+        </div>
+        <div class="demo-step-item">
+          <div class="demo-step-number">2</div>
+          <div class="demo-step-title">Transfer Token</div>
+          <div class="demo-step-desc">Copy the generated token JSON or scan the QR code to simulate transfer to the Merchant POS terminal.</div>
+        </div>
+        <div class="demo-step-item">
+          <div class="demo-step-number">3</div>
+          <div class="demo-step-title">Verify &amp; Accept (Merchant)</div>
+          <div class="demo-step-desc">Merchant verifies the cryptographic signature in sub-second latency and queues it locally in SQLite.</div>
+        </div>
+        <div class="demo-step-item">
+          <div class="demo-step-number">4</div>
+          <div class="demo-step-title">Queue in SQLite</div>
+          <div class="demo-step-desc">Transaction enters merchant's local queue with status <code>Pending Sync</code>.</div>
+        </div>
+        <div class="demo-step-item">
+          <div class="demo-step-number">5</div>
+          <div class="demo-step-title">Sync with Bank Switch</div>
+          <div class="demo-step-desc">Merchant transmits queued batch to Central Bank Switch when connectivity is available.</div>
+        </div>
+        <div class="demo-step-item">
+          <div class="demo-step-number">6</div>
+          <div class="demo-step-title">Bank Settlement</div>
+          <div class="demo-step-desc">Bank validates batch, detects double-spends, and issues signed receipts to restore payer allowance.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Page Header -->
     <div class="page-header">
       <div>
         <h1 class="page-title">📱 Customer Payer Device</h1>
-        <p class="page-subtitle">User: <strong id="payer-name">Alice</strong> | Payer ID: <span class="token-code" id="payer-id-display">alice@upi</span></p>
+        <p class="page-subtitle">Customer: <strong id="payer-name">Alice</strong> &bull; Payer UPI ID: <span class="token-code" id="payer-id-display">alice@upi</span> &bull; Port: 5001</p>
       </div>
       <div>
-        <span class="status-pill status-offline"><span class="status-dot"></span> Device Operating Offline</span>
+        <span class="status-pill status-offline"><span class="status-dot"></span> Device Operating Offline (Zero Network)</span>
       </div>
     </div>
 
-    <!-- Limit Exceeded / Warning Banner -->
+    <!-- Limit Warning Banner -->
     <div id="limit-warning-banner" class="alert alert-danger" style="display: none;">
-      ⚠️ <strong>Offline Limit Cap Reached:</strong> Your cumulative unsynced spend has reached the ₹500.00 safe threshold. Further offline payments are blocked until previous payments are settled with the bank.
+      ⚠️ <strong>Offline Spend Limit Reached:</strong> Your cumulative unsynced spend has reached the ₹500.00 safe threshold. Further offline payments are blocked until pending payments are settled with the Bank.
     </div>
 
-    <!-- Stats & Allowance Balance Cards -->
-    <div class="grid-3">
-      <div class="stat-card">
-        <div class="stat-label">Available Offline Allowance</div>
-        <div class="stat-value" style="color: var(--success);" id="allowance-display">₹500.00</div>
-        <div class="stat-subtext">Remaining balance out of ₹500 cap</div>
+    <!-- =====================================================================
+         STEP 1: PAYER / ACCOUNT & ALLOWANCE INFORMATION
+         ===================================================================== -->
+    <div style="margin-bottom: 24px;">
+      <h2 style="font-size: 1.15rem; font-weight: 700; color: var(--text-primary); margin-bottom: 12px; display: flex; align-items: center; gap: 8px;">
+        <span>💳 Step 1: Payer Account &amp; Offline Allowance</span>
+      </h2>
+      <div class="grid-3">
+        <div class="stat-card" style="border-left: 4px solid var(--success);">
+          <div class="stat-label">Available Offline Allowance</div>
+          <div class="stat-value" style="color: var(--success);" id="allowance-display">₹500.00</div>
+          <div class="stat-subtext">Remaining balance out of ₹500 cap</div>
+        </div>
+
+        <div class="stat-card" style="border-left: 4px solid var(--primary);">
+          <div class="stat-label">Total Unsynced Spend</div>
+          <div class="stat-value" style="color: var(--primary);" id="unsynced-display">₹0.00</div>
+          <div class="stat-subtext">Cumulative offline IOUs generated</div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-label">Outstanding Tokens</div>
+          <div class="stat-value" id="outstanding-count-display">0</div>
+          <div class="stat-subtext">Tokens awaiting bank settlement</div>
+        </div>
       </div>
 
-      <div class="stat-card">
-        <div class="stat-label">Total Unsynced Spend</div>
-        <div class="stat-value" style="color: var(--primary);" id="unsynced-display">₹0.00</div>
-        <div class="stat-subtext">Cumulative offline IOUs generated</div>
-      </div>
-
-      <div class="stat-card">
-        <div class="stat-label">Outstanding Tokens</div>
-        <div class="stat-value" id="outstanding-count-display">0</div>
-        <div class="stat-subtext">Tokens awaiting bank confirmation</div>
+      <!-- Visual Progress Bar for ₹500 Cap -->
+      <div class="card" style="padding: 16px 20px; margin-top: -8px;">
+        <div style="display: flex; justify-content: space-between; font-size: 0.88rem; font-weight: 600; margin-bottom: 6px;">
+          <span>Offline Spending Cap Utilization:</span>
+          <span id="spend-ratio-text">₹0.00 / ₹500.00 (0%)</span>
+        </div>
+        <div class="progress-bar-container">
+          <div id="spend-progress-fill" class="progress-bar-fill" style="width: 0%;"></div>
+        </div>
+        <div style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 8px; line-height: 1.4;">
+          <strong>Security Limit Rule:</strong> Offline UPI payments are strictly capped at ₹500.00 (50,000 paise). This cap limits exposure while disconnected. Your full allowance is restored when transactions are settled with the Bank.
+        </div>
       </div>
     </div>
 
-    <!-- Visual Progress Bar for ₹500 Limit -->
-    <div class="card" style="margin-bottom: 24px; padding: 16px 20px;">
-      <div style="display: flex; justify-content: space-between; font-size: 0.85rem; font-weight: 600;">
-        <span>Offline Spend Progress:</span>
-        <span id="spend-ratio-text">₹0.00 / ₹500.00 (0%)</span>
-      </div>
-      <div class="progress-bar-container">
-        <div id="spend-progress-fill" class="progress-bar-fill" style="width: 0%;"></div>
-      </div>
-    </div>
-
+    <!-- =====================================================================
+         STEP 2 & 3: PAYMENT GENERATION & TOKEN HANDOFF
+         ===================================================================== -->
     <div class="grid-2">
-      <!-- Payment Generation Form -->
+      <!-- Step 2: Payment Generation Form -->
       <div class="card">
         <div class="card-header">
-          <h2 class="card-title">💸 Generate Offline Payment</h2>
+          <h2 class="card-title">💸 Step 2: Generate Offline Payment</h2>
+          <span class="badge badge-created">RSA-2048 Signing</span>
         </div>
         <form id="payment-form">
           <div class="form-group">
-            <label class="form-label" for="payee-id-input">Merchant / Payee ID (Required for Payee Binding)</label>
+            <label class="form-label" for="payee-id-input">Merchant / Payee ID (Strict Payee Binding)</label>
             <input type="text" class="form-control" id="payee-id-input" value="merchant_bob@upi" placeholder="e.g. merchant_bob@upi" required>
-            <small style="color: var(--text-muted); font-size: 0.78rem;">Token is cryptographically bound to this merchant and cannot be used elsewhere.</small>
+            <small style="color: var(--text-muted); font-size: 0.78rem;">Cryptographically bound: This token can only be accepted by this merchant.</small>
           </div>
 
           <div class="form-group">
             <label class="form-label" for="amount-input">Amount in INR (₹)</label>
             <input type="number" class="form-control" id="amount-input" min="0.01" max="500" step="0.01" placeholder="e.g. 150.00" required>
+            <small style="color: var(--text-muted); font-size: 0.78rem;">Maximum ₹500.00 cumulative spend per offline session.</small>
           </div>
 
           <button type="submit" class="btn btn-primary btn-block" id="btn-generate">
-            🔒 Generate & Sign Offline Token
+            🔒 Generate &amp; Sign Offline Token
           </button>
         </form>
 
         <div id="form-error-msg" class="alert alert-danger" style="display: none; margin-top: 14px;"></div>
       </div>
 
-      <!-- Generated Token & Offline Handoff Box -->
+      <!-- Step 3: Generated Token Display (QR / JSON Handoff) -->
       <div class="card">
         <div class="card-header">
-          <h2 class="card-title">📦 Offline Token Handoff (QR / JSON)</h2>
-          <span id="handoff-status-badge" class="badge badge-pending" style="display: none;">CREATED</span>
+          <h2 class="card-title">📦 Step 3: Offline Token Handoff (QR / JSON)</h2>
+          <span id="handoff-status-badge" class="badge badge-created" style="display: none;">CREATED</span>
         </div>
 
-        <div id="no-token-placeholder" style="text-align: center; padding: 40px 20px; color: var(--text-muted);">
-          <div style="font-size: 2.5rem; margin-bottom: 10px;">🏷️</div>
-          <p>No offline payment token generated yet.<br>Enter details and click <strong>Generate & Sign</strong>.</p>
+        <div id="no-token-placeholder" class="empty-state-box" style="padding: 30px 16px;">
+          <div class="empty-state-icon">🏷️</div>
+          <div class="empty-state-heading">No Active Token Generated</div>
+          <div class="empty-state-text">
+            Enter an amount and click <strong>Generate &amp; Sign Offline Token</strong>. Your signed QR code and JSON package will appear here.
+          </div>
         </div>
 
         <div id="token-details-box" style="display: none;">
-          <div style="font-size: 0.85rem; line-height: 1.7; margin-bottom: 14px; background: var(--bg-subtle); padding: 12px; border-radius: 6px;">
+          <div style="font-size: 0.85rem; line-height: 1.7; margin-bottom: 14px; background: var(--bg-subtle); border: 1px solid var(--border-color); padding: 12px; border-radius: 6px;">
             <div><strong>Token ID:</strong> <span class="token-code" id="token-id-text"></span></div>
-            <div><strong>Payee ID:</strong> <span id="token-payee-text"></span></div>
+            <div><strong>Payee ID:</strong> <span id="token-payee-text" style="font-weight: 600;"></span></div>
             <div><strong>Amount:</strong> <span style="font-weight: 700; color: var(--success);" id="token-amount-text"></span></div>
-            <div><strong>Timestamp:</strong> <span id="token-time-text"></span></div>
-            <div><strong>Status:</strong> <span class="badge badge-created" id="token-status-badge">CREATED</span> <em>(Not bank-settled)</em></div>
+            <div><strong>Created:</strong> <span id="token-time-text"></span></div>
+            <div><strong>Status:</strong> <span class="badge badge-created" id="token-status-badge">CREATED</span> <em>(Valid offline IOU)</em></div>
           </div>
 
           <!-- QR Code Container -->
           <div class="qr-box">
             <div id="qrcode"></div>
-            <p style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 10px;">Scan this QR code with the Merchant Device.</p>
+            <p style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 10px;">Present this QR code or transfer JSON to the Merchant Device.</p>
           </div>
 
           <!-- File / Copy Fallback -->
           <div style="display: flex; gap: 8px; margin-top: 14px;">
+            <button type="button" class="btn btn-outline btn-sm btn-block" id="btn-copy-token">
+              📋 Copy Token JSON
+            </button>
             <button type="button" class="btn btn-outline btn-sm btn-block" id="btn-download-json">
               💾 Download JSON File
             </button>
-            <button type="button" class="btn btn-outline btn-sm btn-block" id="btn-copy-token">
-              📋 Copy JSON Token
-            </button>
           </div>
-          <div id="copy-success-indicator" style="display: none; font-size: 0.78rem; color: var(--success); text-align: center; margin-top: 6px;">
-            ✓ Token JSON copied to clipboard!
+          <div id="copy-success-indicator" style="display: none; font-size: 0.82rem; color: var(--success); text-align: center; margin-top: 6px;">
+            ✓ Token JSON copied to clipboard! Paste it on the Merchant Dashboard.
           </div>
         </div>
       </div>
     </div>
 
-    <!-- Outstanding & Recent Transactions -->
-    <div class="card" style="margin-top: 24px;">
+    <!-- =====================================================================
+         STEP 4: ON-DEVICE TRANSACTION HISTORY
+         ===================================================================== -->
+    <div class="card" style="margin-top: 28px;">
       <div class="card-header">
-        <h2 class="card-title">📜 On-Device Transaction History</h2>
-        <button class="btn btn-outline btn-sm" id="btn-refresh-payer">🔄 Refresh</button>
+        <div>
+          <h2 class="card-title">📜 On-Device Transaction History</h2>
+          <p style="font-size: 0.82rem; color: var(--text-muted); margin-top: 2px;">
+            History of tokens minted by this device. Un-exported tokens can be cancelled safely.
+          </p>
+        </div>
+        <button class="btn btn-outline btn-sm" id="btn-refresh-payer" type="button">🔄 Refresh</button>
       </div>
 
       <div class="table-responsive">
@@ -149,27 +229,64 @@
           <thead>
             <tr>
               <th>Token ID</th>
-              <th>Payee ID</th>
+              <th>Merchant (Payee)</th>
               <th>Amount</th>
               <th>Time</th>
-              <th>Status</th>
+              <th>Lifecycle Status</th>
               <th>Action</th>
             </tr>
           </thead>
           <tbody id="payer-transactions-tbody">
-            <tr>
-              <td colspan="6" style="text-align: center; color: var(--text-muted); padding: 20px;">Loading transaction history...</td>
-            </tr>
+            <!-- Dynamic rows or empty state injected by JS -->
           </tbody>
         </table>
       </div>
+
+      <!-- Rich Empty State for Payer History -->
+      <div class="empty-state-box" id="payer-empty-state" style="display: none;">
+        <div class="empty-state-icon">📱</div>
+        <div class="empty-state-heading">No Payments Recorded Yet</div>
+        <div class="empty-state-text">
+          You haven't generated any offline payments in this session. Enter an amount above to create your first cryptographically signed offline payment token!
+        </div>
+      </div>
     </div>
 
+    <!-- Footer -->
     <footer class="footer">
-      <p>Offline UPI Payer Device &bull; State persisted in SQLite/JSON &bull; Cap ₹500.00 &bull; Asymmetric RSA-PSS</p>
+      <p>Offline UPI Customer Device &bull; Port 5001 &bull; AES-256-GCM Encrypted Key Storage &bull; ₹500.00 Limit Cap &bull; Zero Network Dependency</p>
     </footer>
   </main>
 
+  <!-- =====================================================================
+       RESET DEMO DATA CONFIRMATION MODAL
+       ===================================================================== -->
+  <div class="modal-overlay" id="reset-demo-modal" style="display: none;">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div style="font-size: 1.5rem;">⚠️</div>
+        <div class="modal-title">Confirm Demo Data Reset</div>
+      </div>
+      <div class="modal-body">
+        <p>Are you sure you want to reset demo data across all services? This will clear disposable test records:</p>
+        <ul>
+          <li><strong>Payer Device:</strong> Resets spend allowance to ₹0.00 / ₹500.00 cap and clears outstanding tokens.</li>
+          <li><strong>Merchant POS:</strong> Clears all queued and settled offline payments from this terminal.</li>
+          <li><strong>Bank Switch:</strong> Clears settled tokens ledger and receipts.</li>
+        </ul>
+        <div style="background: #f0fdf4; border: 1px solid #bbf7d0; padding: 10px 12px; border-radius: var(--radius-sm); font-size: 0.82rem; color: #166534; margin-top: 12px;">
+          ✓ <strong>Preserved Configuration:</strong> Customer RSA private key, Bank signing keypair, trusted payer registry (<code>alice@upi</code>), and merchant credentials (<code>merchant_bob@upi</code>) are preserved.
+        </div>
+        <div id="reset-modal-status" style="margin-top: 12px; display: none;"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline btn-sm" id="btn-cancel-reset" type="button">Cancel</button>
+        <button class="btn btn-danger btn-sm" id="btn-confirm-reset" type="button">🗑️ Yes, Reset Demo Data</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/common.js"></script>
   <script src="/static/js/payer.js"></script>
 </body>
 </html>

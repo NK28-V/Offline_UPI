@@ -22,7 +22,11 @@ if sys.platform == "win32":
     except Exception:
         pass
 
+import requests
+import sqlite3
 from backend import BackendServer
+from reset_demo import reset_bank_db, reset_all_demo_data
+from sample_data import load_sample_demo_data
 
 
 def get_lan_ip() -> str:
@@ -105,6 +109,16 @@ def create_bank_app(
             return False
 
         return state["backend"].verify_merchant_auth(merchant_id, api_key)
+
+    # -------------------------------------------------------------------------
+    # CORS & Cross-Origin Headers for Multi-Port LAN Simulation
+    # -------------------------------------------------------------------------
+    @app.after_request
+    def apply_cors(response):
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, PUT, DELETE"
+        return response
 
     # -------------------------------------------------------------------------
     # HTML Dashboard Routes & Smart Cross-Service Navigation
@@ -191,6 +205,31 @@ def create_bank_app(
         rejected_count = audit_sums["r"] or 0 if audit_sums else 0
         total_received = audit_sums["t"] or 0 if audit_sums else 0
 
+        # Query pending merchant syncs from Merchant service or local DB
+        pending_merchant_syncs = 0
+        pending_merchant_amount = 0.0
+        merchant_reachable = False
+        try:
+            m_resp = requests.get("http://127.0.0.1:5002/api/merchant/status", timeout=0.3)
+            if m_resp.status_code == 200:
+                m_data = m_resp.json()
+                pending_merchant_syncs = m_data.get("pending_sync", 0)
+                pending_merchant_amount = m_data.get("pending_sync_amount", 0.0)
+                merchant_reachable = True
+        except Exception:
+            # Fallback to local SQLite check if operating on single host
+            if os.path.exists("merchant_queue_bob_upi.db"):
+                try:
+                    m_conn = sqlite3.connect("merchant_queue_bob_upi.db")
+                    m_cur = m_conn.cursor()
+                    m_cur.execute("SELECT COUNT(*), SUM(amount) FROM local_queue WHERE status = 'Pending Sync'")
+                    p_row = m_cur.fetchone()
+                    pending_merchant_syncs = p_row[0] or 0
+                    pending_merchant_amount = float(p_row[1] or 0.0)
+                    m_conn.close()
+                except Exception:
+                    pass
+
         return jsonify({
             "network_online": state["network_online"],
             "settled_count": settled_count,
@@ -199,10 +238,46 @@ def create_bank_app(
             "flagged_count": flagged_count,
             "rejected_count": rejected_count,
             "total_received": total_received,
+            "pending_merchant_syncs": pending_merchant_syncs,
+            "pending_merchant_amount": round(pending_merchant_amount, 2),
+            "merchant_reachable": merchant_reachable,
             "trusted_payers": trusted_payers,
             "recent_batches": batches,
             "ledger": ledger
         })
+
+    @app.route("/api/bank/trigger_merchant_sync", methods=["POST"])
+    def trigger_merchant_sync():
+        """Triggers merchant pending synchronization directly from the Bank dashboard."""
+        if not state["network_online"]:
+            return jsonify({
+                "error": "Bank network unavailable.",
+                "message": "Central banking switch is currently simulated offline. Cannot accept sync batches."
+            }), 503
+        try:
+            resp = requests.post("http://127.0.0.1:5002/api/merchant/sync", timeout=3.0)
+            return jsonify(resp.json()), resp.status_code
+        except Exception as e:
+            return jsonify({
+                "error": "Merchant POS unreachable.",
+                "message": f"Could not connect to Merchant Service at port 5002: {str(e)}"
+            }), 502
+
+    @app.route("/api/reset_demo", methods=["POST"])
+    def reset_demo():
+        """Resets disposable demo records while preserving keys, registries, and accounts."""
+        local_only = request.args.get("local_only", "false").lower() == "true"
+        if local_only:
+            report = reset_bank_db(state["db_path"])
+        else:
+            report = reset_all_demo_data(bank_db=state["db_path"])
+        return jsonify(report), 200
+
+    @app.route("/api/load_sample_data", methods=["POST"])
+    def load_sample_data():
+        """Loads sample demo records on explicit user action."""
+        report = load_sample_demo_data(bank_db=state["db_path"])
+        return jsonify(report), 200
 
     @app.route("/api/bank/sync_batch", methods=["POST"])
     def sync_batch_endpoint():

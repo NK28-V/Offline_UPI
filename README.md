@@ -254,6 +254,62 @@ This project includes production-grade security patterns adapted for local acade
 
 ---
 
+## 🧹 Clean First-Run Experience & Demo Data Management
+
+The application is configured to start with **clean, empty transaction and queue histories** for a fresh presentation:
+- **No Pre-Generated Mock Data:** Dashboards do not display dummy pre-settled payments or fake queue items on startup.
+- **Reset Demo Data Feature:** Accessible from the top navigation bar of every dashboard (or via `python reset_demo.py`).
+  - **Requires explicit confirmation** via an interactive modal before wiping disposable state.
+  - **Coordinated across all three services** (Payer, Merchant, and Bank).
+  - **What is cleared:**
+    - Payer: Resets unsynced spent balance to ₹0.00 and clears outstanding tokens.
+    - Merchant: Clears all local queued payments and sync records from `merchant_queue_bob_upi.db`.
+    - Bank: Clears settled ledger tokens, settlement receipts, and sync audit logs from `offline_upi_backend.db`.
+  - **What is preserved:**
+    - Customer RSA-2048 private key (encrypted via PBKDF2 / AES-256-GCM).
+    - Bank core signing RSA-2048 keypair (`primary`).
+    - Pre-provisioned trusted payer public key registry (`alice@upi`).
+    - Authorized merchant credentials (`merchant_bob@upi`).
+    - Database schemas, table structures, and security configurations.
+- **Optional "Load Sample Data":** Disabled by default. Can be triggered explicitly from the Technical Details panel on the Bank Dashboard (or via `python sample_data.py`) if sample data is needed for inspection.
+
+---
+
+## 🧭 Redesigned UI & Step-by-Step Demo Guide
+
+The user interface features a consistent fintech design system across all three services with clear cross-service navigation:
+- **Title:** **Offline UPI Payment Simulator**
+- **Unified Navigation Bar:** Cross-port links dynamically point to:
+  - 📱 **Payer Dashboard** (`http://localhost:5001/payer`)
+  - 🏪 **Merchant Dashboard** (`http://localhost:5002/merchant`)
+  - 🏦 **Bank Dashboard** (`http://localhost:5003/bank`)
+- **How to Run a Demo Guide:** A persistent, collapsible 6-step walkthrough embedded in every dashboard.
+
+### Step-by-Step Demonstration Script:
+1. **Payer Device (Port 5001):**
+   - Check available offline allowance (₹500.00).
+   - Enter payment amount (e.g., ₹150.00) and merchant ID (`merchant_bob@upi`).
+   - Click **Generate & Sign Offline Token**. The token is cryptographically signed using the on-device RSA-2048 private key.
+   - Click **Copy Token JSON** (or view the generated QR code).
+2. **Merchant Device (Port 5002):**
+   - Paste the token JSON into the input box.
+   - Click **Verify & Queue Token Locally**.
+   - Observe the sub-second local verification result (&lt; 1 ms) and notice that the payment is stored locally as `Pending Sync`.
+3. **Bank Switch (Port 5003):**
+   - Open the Bank Dashboard. Section B shows the pending transaction waiting at the Merchant POS.
+   - Click **Sync Pending Transactions Now** (or click Sync on the Merchant POS).
+   - Observe Section A metrics update and Section C (Master Transaction Ledger) display the newly settled transaction with status `SETTLED`.
+4. **Demonstrating Network Outage (Resilience):**
+   - In Section E of the Bank Dashboard, click **Simulate Outage** to set the Bank Switch offline.
+   - Generate another payment on the Payer device (e.g. ₹80.00) and verify it at the Merchant POS.
+   - Notice that the Merchant POS accepts and safely queues the payment in local SQLite while completely offline.
+   - Restore the Bank Network to **Online** and click **Sync Pending Transactions Now** to settle the offline queue!
+5. **Demonstrating Double-Spend Rejection:**
+   - In Section E of the Bank Dashboard, click **Trigger Double-Spend Attempt**.
+   - Observe the bank's atomic SAVEPOINT defense catch and reject the duplicate token with 100% precision.
+
+---
+
 ## 🌐 Complete REST API Audit & Specification
 
 ### Device 1: Customer Payer Service (`payer_service.py` :5001)

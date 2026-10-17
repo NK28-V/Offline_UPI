@@ -23,6 +23,8 @@ if sys.platform == "win32":
         pass
 
 from payer import PayerDevice, OfflineSpendLimitExceededError
+from reset_demo import reset_payer_state, reset_all_demo_data
+from sample_data import load_sample_demo_data
 
 
 def get_lan_ip() -> str:
@@ -76,6 +78,16 @@ def create_payer_app(
     app.config["PAYER_STATE"] = state
 
     # -------------------------------------------------------------------------
+    # CORS & Cross-Origin Headers for Multi-Port LAN Simulation
+    # -------------------------------------------------------------------------
+    @app.after_request
+    def apply_cors(response):
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, PUT, DELETE"
+        return response
+
+    # -------------------------------------------------------------------------
     # HTML Dashboard Routes & Smart Cross-Service Navigation
     # -------------------------------------------------------------------------
     @app.route("/")
@@ -96,6 +108,28 @@ def create_payer_app(
     @app.route("/health", methods=["GET"])
     def health():
         return jsonify({"status": "ok", "service": "payer"}), 200
+
+    @app.route("/api/reset_demo", methods=["POST"])
+    def reset_demo():
+        """Resets disposable demo records while preserving keys, registries, and accounts."""
+        local_only = request.args.get("local_only", "false").lower() == "true"
+        if local_only:
+            report = reset_payer_state(state["state_file"])
+        else:
+            report = reset_all_demo_data(payer_state_file=state["state_file"])
+        # Update in-memory PayerDevice
+        p = state["payer"]
+        p.unsynced_spent_paise = 0
+        p.outstanding_tokens = {}
+        p._save_state()
+        return jsonify(report), 200
+
+    @app.route("/api/load_sample_data", methods=["POST"])
+    def load_sample_data():
+        """Loads sample demo records on explicit user action."""
+        report = load_sample_demo_data(payer_state_file=state["state_file"])
+        state["payer"]._load_state()
+        return jsonify(report), 200
 
     # -------------------------------------------------------------------------
     # System Info & Public Key APIs
