@@ -175,6 +175,11 @@ function displayTokenHandoff(tokenPkg) {
   document.getElementById("token-amount-text").innerText = `₹${payload.amount.toFixed(2)}`;
   document.getElementById("token-time-text").innerText = new Date(payload.timestamp * 1000).toLocaleTimeString();
 
+  const rawPreview = document.getElementById("raw-token-json-preview");
+  if (rawPreview) {
+    rawPreview.innerText = JSON.stringify(tokenPkg, null, 2);
+  }
+
   // Generate QR Code
   const qrContainer = document.getElementById("qrcode");
   if (qrContainer) {
@@ -183,14 +188,14 @@ function displayTokenHandoff(tokenPkg) {
       const jsonStr = JSON.stringify(tokenPkg);
       qrcodeInstance = new QRCode(qrContainer, {
         text: jsonStr,
-        width: 180,
-        height: 180,
+        width: 200,
+        height: 200,
         colorDark: "#0f172a",
         colorLight: "#ffffff",
         correctLevel: QRCode.CorrectLevel.M
       });
     } catch (qrErr) {
-      qrContainer.innerHTML = `<p style="font-size:0.8rem;color:var(--text-muted);">QR rendering fallback: Use JSON download or copy below.</p>`;
+      qrContainer.innerHTML = `<p style="font-size:16px;color:var(--text-muted);">QR code display error. Please use Copy Payment JSON below.</p>`;
     }
   }
 }
@@ -227,7 +232,7 @@ function copyTokenJson() {
     const indicator = document.getElementById("copy-success-indicator");
     if (indicator) {
       indicator.style.display = "block";
-      setTimeout(() => { indicator.style.display = "none"; }, 3500);
+      setTimeout(() => { indicator.style.display = "none"; }, 5000);
     }
   });
 }
@@ -249,27 +254,17 @@ function renderPayerTransactions(txList) {
     const statusBadgeClass =
       tx.status === "SETTLED" ? "badge-settled" :
       tx.status === "EXPORTED" ? "badge-pending" :
-      tx.status === "CREATED" ? "badge-created" :
+      tx.status === "CREATED" ? "badge-pending" :
       tx.status === "CANCELLED" ? "badge-rejected" : "badge-pending";
 
-    const isCancellable = tx.status === "CREATED";
-    const actionBtn = isCancellable
-      ? `<button class="btn btn-outline btn-sm" style="color:var(--danger); border-color:var(--danger-border); padding: 2px 8px;" onclick="cancelToken('${tx.token_id}')">Cancel</button>`
-      : tx.status === "EXPORTED"
-      ? `<span style="font-size:0.75rem;color:var(--text-muted); font-style:italic;" title="Reservation locked until bank settlement">Locked (In Transit)</span>`
-      : `<span style="font-size:0.75rem;color:var(--text-muted);">&mdash;</span>`;
-
-    const timeFormatted = tx.timestamp ? new Date(tx.timestamp * 1000).toLocaleTimeString() : "N/A";
-    const shortId = tx.token_id ? tx.token_id.slice(0, 8) : "—";
+    const shortId = tx.token_id ? tx.token_id.slice(0, 8) + "..." : "—";
 
     return `
       <tr>
-        <td><span class="token-code" title="${tx.token_id}">${shortId}...</span></td>
-        <td><code>${tx.payee_id}</code></td>
-        <td><strong style="color: var(--text-primary);">₹${tx.amount.toFixed(2)}</strong></td>
-        <td>${timeFormatted}</td>
+        <td><code>${shortId}</code></td>
+        <td><strong>${tx.payee_id}</strong></td>
+        <td><strong>₹${Number(tx.amount).toFixed(2)}</strong></td>
         <td><span class="badge ${statusBadgeClass}">${tx.status}</span></td>
-        <td>${actionBtn}</td>
       </tr>
     `;
   }).join("");

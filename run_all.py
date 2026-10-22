@@ -38,30 +38,11 @@ def main():
     print("  LAUNCHING TRUE THREE-DEVICE OFFLINE UPI SERVICES")
     print("=" * 80)
 
-    # --- Enforce required credentials from environment (never from CLI args) ---
-    payer_passphrase = os.getenv("PAYER_PASSPHRASE", "")
-    bank_admin_token = os.getenv("BANK_ADMIN_TOKEN", "")
-
-    missing = []
-    if not payer_passphrase:
-        missing.append("PAYER_PASSPHRASE")
-    if not bank_admin_token:
-        missing.append("BANK_ADMIN_TOKEN")
-
-    if missing:
-        print(
-            "[FATAL] Required environment variables are not set: " + ", ".join(missing) + "\n"
-            "  Set them before running:\n"
-            "    Windows:\n"
-            "      set PAYER_PASSPHRASE=your-strong-passphrase\n"
-            "      set BANK_ADMIN_TOKEN=your-strong-admin-token\n"
-            "    Linux/Mac:\n"
-            "      export PAYER_PASSPHRASE=your-strong-passphrase\n"
-            "      export BANK_ADMIN_TOKEN=your-strong-admin-token\n"
-            "  DEMO ONLY: Any non-empty strings work for the academic demonstration.",
-            file=sys.stderr
-        )
-        sys.exit(1)
+    # --- Resolve required credentials from environment or default demo values ---
+    payer_passphrase = os.getenv("PAYER_PASSPHRASE") or "demo-payer-passphrase"
+    bank_admin_token = os.getenv("BANK_ADMIN_TOKEN") or "demo-admin-secret-2026"
+    os.environ["PAYER_PASSPHRASE"] = payer_passphrase
+    os.environ["BANK_ADMIN_TOKEN"] = bank_admin_token
 
     # 1. Provision default payer identity into merchant and bank registries.
     # PayerDevice reads PAYER_PASSPHRASE from the environment automatically.

@@ -136,7 +136,7 @@ def get_payer_status():
             "payee_id": info.get("payee_id", "merchant_bob@upi"),
             "amount": info.get("amount", 0.0),
             "timestamp": info.get("timestamp", time.time()),
-            "status": "OUTSTANDING"
+            "status": info.get("status", "CREATED")
         }
         for tid, info in payer.outstanding_tokens.items()
     ]
@@ -201,6 +201,22 @@ def cancel_payer_token():
     return jsonify({"error": f"Token '{token_id}' not found among outstanding tokens."}), 404
 
 
+@app.route("/api/payer/export", methods=["POST"])
+def export_payer_token():
+    """Marks a token as EXPORTED (copied/downloaded), locking it from cancellation."""
+    data = request.get_json() or {}
+    token_id = data.get("token_id")
+    if not token_id:
+        return jsonify({"error": "token_id is required."}), 400
+
+    success = payer.mark_token_exported(token_id)
+    return jsonify({
+        "success": success,
+        "token_id": token_id,
+        "message": "Token marked as exported." if success else "Token not found or already exported."
+    })
+
+
 # =========================================================================
 # Merchant APIs
 # =========================================================================
@@ -231,10 +247,19 @@ def get_merchant_status():
 
 @app.route("/api/merchant/receive", methods=["POST"])
 def receive_merchant_payment():
-    data = request.get_json() or {}
-    token_pkg = data.get("token_package")
+    raw_text = request.get_data(as_text=True)
+    data = request.get_json(silent=True)
+    token_pkg = None
+    if isinstance(data, dict):
+        if "token_package" in data:
+            token_pkg = data["token_package"]
+        else:
+            token_pkg = data
+    elif raw_text and raw_text.strip():
+        token_pkg = raw_text
+
     if not token_pkg:
-        return jsonify({"accepted": False, "status": "REJECTED", "reason": "Missing token package."}), 400
+        return jsonify({"accepted": False, "status": "REJECTED", "reason": "Missing payment token in request body."}), 400
 
     result = merchant.verify_and_accept_token(token_pkg)
     return jsonify(result)
@@ -315,6 +340,11 @@ def get_bank_status():
     audit_sums = cursor.fetchone()
     duplicate_count = audit_sums["d"] or 0
     rejected_count = audit_sums["r"] or 0
+
+    # Total received = all tokens ever submitted to the switch
+    cursor.execute("SELECT COUNT(*) AS c FROM settled_tokens")
+    total_received = cursor.fetchone()["c"] or 0
+
     # Merchant pending queue summary
     m_summary = merchant.summary()
     pending_merchant_syncs = m_summary["pending_sync"]
@@ -335,6 +365,12 @@ def get_bank_status():
         "recent_batches": batches,
         "ledger": ledger
     })
+
+
+@app.route("/api/bank/public_key", methods=["GET"])
+def get_bank_public_key():
+    """Returns the bank's RSA public key PEM for display and client-side trust pinning."""
+    return jsonify({"public_key_pem": backend.bank_public_key_pem})
 
 
 @app.route("/api/bank/trigger_merchant_sync", methods=["POST"])
@@ -379,7 +415,7 @@ def simulate_duplicate_submission():
         }
 
     # Re-submit to trigger double-spend rejection
-    report = backend.sync_batch(merchant.merchant_id, [target_token])
+    report = backend.sync_batch(target_token["payload"]["payeeID"], [target_token])
 
     if report["duplicates"]:
         return jsonify({

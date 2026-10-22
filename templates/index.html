@@ -3,179 +3,133 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Offline UPI Payment Simulator — System Portal</title>
+  <title>Offline UPI Payment Simulator — Portal</title>
   <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
-  <header class="navbar">
-    <a href="/" class="brand">
-      <span>Offline UPI Payment Simulator</span>
-      <span class="brand-badge">Central Switch Portal</span>
-    </a>
-    <nav class="nav-links">
-      <a href="/payer" class="nav-link" data-role="payer">📱 Payer Dashboard</a>
-      <a href="/merchant" class="nav-link" data-role="merchant">🏪 Merchant Dashboard</a>
-      <a href="/bank" class="nav-link" data-role="bank">🏦 Bank Dashboard</a>
-    </nav>
-    <div class="navbar-actions">
-      <button class="btn-guide-nav" id="btn-toggle-demo-guide" type="button" aria-expanded="false">
-        📖 How to Run a Demo
-      </button>
-      <button class="btn-reset-nav" id="btn-open-reset-modal" type="button">
-        🔄 Reset Demo Data
-      </button>
+  <!-- Large Obvious Navigation Bar -->
+  <header class="top-nav">
+    <div class="nav-inner">
+      <a href="/" class="nav-brand">
+        <span>Offline UPI</span>
+        <span class="nav-brand-badge">Simulator Portal</span>
+      </a>
+      <nav class="nav-menu">
+        <a href="/payer" class="nav-item" data-role="payer">Payer</a>
+        <a href="/merchant" class="nav-item" data-role="merchant">Merchant</a>
+        <a href="/bank" class="nav-item" data-role="bank">Bank</a>
+      </nav>
+      <div>
+        <button class="btn-secondary" id="btn-open-reset-modal" style="font-size: 15px; padding: 10px 18px;" type="button">
+          🔄 Reset Demo Data
+        </button>
+      </div>
     </div>
   </header>
 
   <main class="app-container">
-    <!-- Persistent Guided Demo Stepper Panel (Collapsible) -->
-    <div class="demo-guide-card" id="demo-guide-panel" style="display: none;">
-      <div class="demo-guide-header">
-        <div class="demo-guide-title">
-          <span>🚀 Interactive Demo Workflow — Complete End-to-End Cycle</span>
-        </div>
-        <button type="button" class="btn btn-outline btn-sm" id="btn-close-demo-guide">✕ Close Guide</button>
-      </div>
-      <p style="font-size: 0.88rem; color: var(--text-secondary); margin-bottom: 8px;">
-        Follow these 6 steps to demonstrate genuine offline payment generation, local merchant verification, and delayed central settlement:
+    <div style="text-align: center; margin-bottom: 36px;">
+      <h1 class="page-title" style="font-size: 40px; margin-bottom: 12px;">Offline UPI Payment Simulator</h1>
+      <p class="page-subtitle" style="font-size: 20px; max-width: 720px; margin: 0 auto;">
+        Simulate real offline payments with asymmetric cryptography, offline spend limits, and delayed bank settlement.
       </p>
-      <div class="demo-stepper-grid">
-        <div class="demo-step-item">
-          <div class="demo-step-number">1</div>
-          <div class="demo-step-title">1. Generate Token (Payer)</div>
-          <div class="demo-step-desc">Open Payer Dashboard. Enter amount (up to ₹500 cap) and merchant ID. Payer creates and signs token with RSA-2048.</div>
-        </div>
-        <div class="demo-step-item">
-          <div class="demo-step-number">2</div>
-          <div class="demo-step-title">2. Transfer Token</div>
-          <div class="demo-step-desc">Copy token JSON or scan QR code to simulate BLE/NFC/soundwave offline transfer from Payer to Merchant POS.</div>
-        </div>
-        <div class="demo-step-item">
-          <div class="demo-step-number">3</div>
-          <div class="demo-step-title">3. Verify &amp; Accept (Merchant)</div>
-          <div class="demo-step-desc">Paste token. Merchant verifies RSA signature in sub-second latency using pre-provisioned trusted public keys. Zero bank dependency!</div>
-        </div>
-        <div class="demo-step-item">
-          <div class="demo-step-number">4</div>
-          <div class="demo-step-title">4. Queue in Local SQLite</div>
-          <div class="demo-step-desc">Accepted payment enters merchant's local queue with status <code>Pending Sync</code>, preserved across reboots.</div>
-        </div>
-        <div class="demo-step-item">
-          <div class="demo-step-number">5</div>
-          <div class="demo-step-title">5. Sync with Bank Switch</div>
-          <div class="demo-step-desc">When network connectivity is available, merchant transmits queued tokens to the Bank Switch for final settlement.</div>
-        </div>
-        <div class="demo-step-item">
-          <div class="demo-step-number">6</div>
-          <div class="demo-step-title">6. Bank Settlement &amp; Ledger</div>
-          <div class="demo-step-desc">Bank validates batch, atomically catches duplicates via SQLite SAVEPOINTs, issues signed receipts, and updates ledger.</div>
-        </div>
-      </div>
     </div>
 
-    <!-- Page Header -->
-    <div class="page-header">
-      <div>
-        <h1 class="page-title">Offline / Low-Connectivity UPI Payment System</h1>
-        <p class="page-subtitle">Multi-Device Architecture Simulation with Asymmetric Cryptography, Offline Limits, and Delayed Bank Settlement</p>
-      </div>
-      <div id="network-pill-container">
-        <span class="status-pill status-online"><span class="status-dot"></span> Core System Active</span>
-      </div>
-    </div>
-
-    <!-- Quick Link Cards to the 3 Dashboards -->
-    <div class="grid-3" style="margin-top: 10px;">
-      <div class="card" style="border-top: 4px solid var(--primary);">
-        <div class="card-header">
-          <h2 class="card-title">📱 1. Payer Dashboard</h2>
-          <span class="badge badge-created">Customer Device</span>
-        </div>
-        <p style="color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 16px;">
-          Simulates a smartphone generating cryptographically signed offline tokens (IOUs). Enforces the <strong>₹500.00 safe offline spend limit</strong>, persistent balance tracking, and strict payee binding.
-        </p>
-        <ul style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 20px; padding-left: 20px; line-height: 1.6;">
-          <li>RSA-2048 signing on-device</li>
-          <li>QR code &amp; JSON file export</li>
-          <li>Enforces ₹500.00 exact spend cap</li>
-          <li>Port 5001 in multi-device mode</li>
-        </ul>
-        <a href="/payer" data-cross-link="payer" class="btn btn-primary btn-block">Open Payer Device →</a>
-      </div>
-
-      <div class="card" style="border-top: 4px solid var(--warning);">
-        <div class="card-header">
-          <h2 class="card-title">🏪 2. Merchant Dashboard</h2>
-          <span class="badge badge-pending">Business Owner POS</span>
-        </div>
-        <p style="color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 16px;">
-          Simulates a merchant POS terminal accepting offline payments. Autonomously verifies RSA signatures in <strong>sub-second latency</strong> using a trusted payer registry, and queues in local SQLite.
-        </p>
-        <ul style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 20px; padding-left: 20px; line-height: 1.6;">
-          <li>Sub-second local verification</li>
-          <li>Persistent queue survives reboot</li>
-          <li>Delayed batch sync with bank</li>
-          <li>Port 5002 in multi-device mode</li>
-        </ul>
-        <a href="/merchant" data-cross-link="merchant" class="btn btn-warning btn-block">Open Merchant Device →</a>
-      </div>
-
-      <div class="card" style="border-top: 4px solid var(--success);">
-        <div class="card-header">
-          <h2 class="card-title">🏦 3. Bank Dashboard</h2>
-          <span class="badge badge-settled">Central Ledger</span>
-        </div>
-        <p style="color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 16px;">
-          Simulates the Central UPI Switch &amp; Core Banking ledger. Performs atomic settlement, <strong>100% double-spend detection</strong> via SQLite savepoints, and 24-hour stale token flagging.
-        </p>
-        <ul style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 20px; padding-left: 20px; line-height: 1.6;">
-          <li>Atomic duplicate detection</li>
-          <li>24-hour stale token review</li>
-          <li>Network online/offline simulator</li>
-          <li>Port 5003 in multi-device mode</li>
-        </ul>
-        <a href="/bank" data-cross-link="bank" class="btn btn-success btn-block">Open Bank Network →</a>
-      </div>
-    </div>
-
-    <!-- Multi-Device Local Network Setup Guide -->
-    <div class="card" style="margin-top: 30px;">
-      <div class="card-header">
-        <h2 class="card-title">🌐 Multi-Device Local Network (Wi-Fi / LAN) Architecture</h2>
-        <span class="badge badge-transferred">True 3-Process Mode</span>
-      </div>
-      <p style="font-size: 0.92rem; color: var(--text-secondary); margin-bottom: 16px;">
-        This academic project demonstrates a genuine three-device architecture operating across independent network ports:
-      </p>
-
-      <div class="grid-2">
-        <div style="background: var(--bg-subtle); padding: 16px; border-radius: var(--radius-sm); border: 1px solid var(--border-color);">
-          <h3 style="font-size: 0.95rem; font-weight: 600; margin-bottom: 8px;">Independent Services (Ports 5001, 5002, 5003):</h3>
-          <p style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 10px;">
-            Run <code style="background: #fff; padding: 2px 6px; border-radius: 4px;">python run_all.py</code> to launch all three services:
+    <!-- 3 Big Action Cards -->
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px; margin-bottom: 36px;">
+      
+      <!-- Card 1: Payer -->
+      <div class="card" style="display: flex; flex-direction: column; justify-content: space-between;">
+        <div>
+          <div style="font-size: 36px; margin-bottom: 12px;">📱</div>
+          <h2 class="card-title" style="font-size: 24px;">1. Payer (Customer)</h2>
+          <p style="font-size: 16px; color: var(--text-muted); line-height: 1.5; margin-bottom: 20px;">
+            Create offline payment tokens up to the <strong>₹500.00 allowance</strong>. Tokens are digitally signed with RSA-2048 and can be copied or scanned.
           </p>
-          <div style="background: #fff; padding: 12px; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem; line-height: 1.8;">
-            <div>📱 <strong>Payer Service:</strong> <a href="http://localhost:5001/payer" target="_blank">http://localhost:5001/payer</a></div>
-            <div>🏪 <strong>Merchant POS:</strong> <a href="http://localhost:5002/merchant" target="_blank">http://localhost:5002/merchant</a></div>
-            <div>🏦 <strong>Bank Switch:</strong> <a href="http://localhost:5003/bank" target="_blank">http://localhost:5003/bank</a></div>
+        </div>
+        <a href="/payer" data-cross-link="payer" class="btn-primary" style="text-align: center; text-decoration: none; display: block;">
+          Open Payer Dashboard →
+        </a>
+      </div>
+
+      <!-- Card 2: Merchant -->
+      <div class="card" style="display: flex; flex-direction: column; justify-content: space-between;">
+        <div>
+          <div style="font-size: 36px; margin-bottom: 12px;">🏪</div>
+          <h2 class="card-title" style="font-size: 24px;">2. Merchant POS</h2>
+          <p style="font-size: 16px; color: var(--text-muted); line-height: 1.5; margin-bottom: 20px;">
+            Paste payment tokens and verify signatures locally in <strong>under 1 millisecond</strong> without internet. Payments are safely queued in local SQLite.
+          </p>
+        </div>
+        <a href="/merchant" data-cross-link="merchant" class="btn-primary" style="text-align: center; text-decoration: none; display: block;">
+          Open Merchant POS →
+        </a>
+      </div>
+
+      <!-- Card 3: Bank -->
+      <div class="card" style="display: flex; flex-direction: column; justify-content: space-between;">
+        <div>
+          <div style="font-size: 36px; margin-bottom: 12px;">🏦</div>
+          <h2 class="card-title" style="font-size: 24px;">3. Bank Switch</h2>
+          <p style="font-size: 16px; color: var(--text-muted); line-height: 1.5; margin-bottom: 20px;">
+            Central banking server. Receive batch syncs, view settled ledger, prevent <strong>double-spending</strong>, and simulate internet outages with one click.
+          </p>
+        </div>
+        <a href="/bank" data-cross-link="bank" class="btn-primary btn-success" style="text-align: center; text-decoration: none; display: block;">
+          Open Bank Network →
+        </a>
+      </div>
+
+    </div>
+
+    <!-- Quick How-To Guide -->
+    <div class="card" style="margin-bottom: 32px;">
+      <h2 class="card-title" style="font-size: 22px; margin-bottom: 16px;">💡 How to Run a 30-Second Demo</h2>
+      <div style="display: flex; flex-direction: column; gap: 16px;">
+        <div style="display: flex; gap: 16px; align-items: flex-start;">
+          <div style="background: var(--primary); color: white; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; flex-shrink: 0;">1</div>
+          <div style="font-size: 17px; line-height: 1.5;">
+            <strong>Generate Payment:</strong> Go to the <strong>Payer Dashboard</strong>, enter an amount (e.g. ₹50.00), and click <em>Generate & Sign</em>. Then click <em>Copy Payment JSON</em>.
           </div>
         </div>
-
-        <div style="background: var(--bg-subtle); padding: 16px; border-radius: var(--radius-sm); border: 1px solid var(--border-color);">
-          <h3 style="font-size: 0.95rem; font-weight: 600; margin-bottom: 8px;">Demonstration Scenarios:</h3>
-          <div style="font-size: 0.85rem; color: var(--text-secondary); line-height: 1.6;">
-            <strong>Scenario 1 (Offline Payment &amp; Local Verification):</strong><br>
-            Generate a ₹150.00 payment on Payer Device &rarr; Transfer JSON to Merchant POS &rarr; Merchant verifies locally in &lt; 1 sec without bank access.
-            <br><br>
-            <strong>Scenario 2 (Bank Outage &amp; Delayed Sync):</strong><br>
-            Toggle Bank Network to <em>"Offline"</em> on Bank Dashboard &rarr; Merchant accepts payment locally &rarr; Restore Bank Network &rarr; Sync clears transaction.
+        <div style="display: flex; gap: 16px; align-items: flex-start;">
+          <div style="background: var(--primary); color: white; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; flex-shrink: 0;">2</div>
+          <div style="font-size: 17px; line-height: 1.5;">
+            <strong>Verify Offline:</strong> Go to the <strong>Merchant POS</strong>, paste the copied JSON, and click <em>Verify Payment</em>. It verifies instantly offline and queues for sync.
+          </div>
+        </div>
+        <div style="display: flex; gap: 16px; align-items: flex-start;">
+          <div style="background: var(--primary); color: white; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; flex-shrink: 0;">3</div>
+          <div style="font-size: 17px; line-height: 1.5;">
+            <strong>Sync with Bank:</strong> On the Merchant POS, click <em>Sync with Bank</em>. The payment is permanently settled into the Bank ledger.
           </div>
         </div>
       </div>
     </div>
 
-    <footer class="footer">
-      <p>Offline / Low-Connectivity UPI Payment System &bull; Academic Core Mechanics Simulation &bull; RSA-2048 &bull; SQLite ACID Engine</p>
+    <!-- Collapsible Advanced Architecture Info -->
+    <details class="technical-details">
+      <summary>View Multi-Device Ports & Architecture Details</summary>
+      <div class="details-content" style="line-height: 1.8;">
+        <p><strong>Multi-Device Port Setup:</strong></p>
+        <ul>
+          <li><strong>Payer Service:</strong> Port <code>5001</code> (<code>http://localhost:5001/payer</code>)</li>
+          <li><strong>Merchant POS:</strong> Port <code>5002</code> (<code>http://localhost:5002/merchant</code>)</li>
+          <li><strong>Bank Switch:</strong> Port <code>5003</code> (<code>http://localhost:5003/bank</code>)</li>
+          <li><strong>Unified Simulator:</strong> Port <code>5000</code> (<code>http://localhost:5000/</code>)</li>
+        </ul>
+        <p><strong>Security Guarantees:</strong></p>
+        <ul>
+          <li>RSA-2048 Asymmetric Digital Signatures with PSS Padding and SHA-256</li>
+          <li>AES-256-GCM encrypted private key container on payer device</li>
+          <li>Atomic SQLite savepoint-based duplicate/replay detection</li>
+          <li>Strict payee binding and pre-provisioned trusted public key registries</li>
+        </ul>
+      </div>
+    </details>
+
+    <footer style="margin-top: 40px; text-align: center; color: var(--text-muted); font-size: 14px; padding-bottom: 24px;">
+      Offline UPI Payment Simulator &bull; Academic Simulation &bull; RSA-2048 Cryptography
     </footer>
   </main>
 
@@ -183,24 +137,24 @@
   <div class="modal-overlay" id="reset-demo-modal" style="display: none;">
     <div class="modal-card">
       <div class="modal-header">
-        <div style="font-size: 1.5rem;">⚠️</div>
-        <div class="modal-title">Confirm Demo Data Reset</div>
+        <div style="font-size: 28px;">⚠️</div>
+        <div class="modal-title">Reset Demo Data?</div>
       </div>
-      <div class="modal-body">
-        <p>Are you sure you want to reset demo data across all services? This will clear disposable test records:</p>
-        <ul>
-          <li><strong>Payer Device:</strong> Resets spend allowance to ₹0.00 / ₹500.00 cap and clears outstanding tokens.</li>
-          <li><strong>Merchant POS:</strong> Clears all queued and settled offline payments from this terminal.</li>
-          <li><strong>Bank Switch:</strong> Clears settled tokens ledger and receipts.</li>
+      <div class="modal-body" style="font-size: 16px; line-height: 1.6;">
+        <p>This will clear all temporary test payments:</p>
+        <ul style="margin: 12px 0 16px 20px;">
+          <li>Payer offline allowance resets to <strong>₹500.00</strong></li>
+          <li>Merchant local payment queue is cleared</li>
+          <li>Bank settled transaction ledger is cleared</li>
         </ul>
-        <div style="background: #f0fdf4; border: 1px solid #bbf7d0; padding: 10px 12px; border-radius: var(--radius-sm); font-size: 0.82rem; color: #166534; margin-top: 12px;">
-          ✓ <strong>Preserved Configuration:</strong> Customer RSA private key, Bank signing keypair, trusted payer registry (<code>alice@upi</code>), and merchant credentials (<code>merchant_bob@upi</code>) are preserved.
-        </div>
+        <p style="color: var(--text-muted); font-size: 14px;">
+          All cryptographic keys, registries, and account profiles are preserved.
+        </p>
         <div id="reset-modal-status" style="margin-top: 12px; display: none;"></div>
       </div>
-      <div class="modal-footer">
-        <button class="btn btn-outline btn-sm" id="btn-cancel-reset" type="button">Cancel</button>
-        <button class="btn btn-danger btn-sm" id="btn-confirm-reset" type="button">🗑️ Yes, Reset Demo Data</button>
+      <div class="modal-footer" style="display: flex; justify-content: flex-end; gap: 12px;">
+        <button class="btn-secondary" id="btn-cancel-reset" type="button" style="padding: 10px 20px;">Cancel</button>
+        <button class="btn-primary btn-danger" id="btn-confirm-reset" type="button" style="padding: 10px 20px; background-color: var(--danger);">Reset Data</button>
       </div>
     </div>
   </div>
@@ -210,7 +164,6 @@
     document.addEventListener("DOMContentLoaded", () => {
       if (window.OfflineUPI) {
         window.OfflineUPI.initNavigation("portal");
-        window.OfflineUPI.initDemoGuide();
         window.OfflineUPI.initResetModal();
       }
     });

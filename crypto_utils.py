@@ -214,12 +214,44 @@ def decrypt_private_key_pem(encrypted_container: Dict[str, Any], passphrase: str
 # Canonical JSON Encoding & Digital Signatures
 # -----------------------------------------------------------------------------
 
+def normalize_canonical_data(data: Any) -> Any:
+    """
+    Recursively normalizes a data structure for deterministic canonical JSON encoding:
+    - Excludes 'signature' key so signature is never part of the signed payload.
+    - Preserves booleans without treating them as integers (bool is subclass of int in Python).
+    - Normalizes finite float values with zero fractional part to int (e.g. 50.0 -> 50)
+      to match JavaScript JSON.stringify behavior (ECMA-262 / RFC 8785).
+    - Sorts dictionary keys recursively.
+    """
+    if isinstance(data, dict):
+        return {
+            k: normalize_canonical_data(v)
+            for k, v in data.items()
+            if k != "signature"
+        }
+    elif isinstance(data, list):
+        return [normalize_canonical_data(item) for item in data]
+    elif isinstance(data, bool):
+        return data
+    elif isinstance(data, float):
+        if math.isfinite(data) and data.is_integer():
+            return int(data)
+        return data
+    return data
+
+
 def canonical_json_bytes(data: Dict[str, Any]) -> bytes:
     """
-    Serializes a dictionary into canonical bytes (sorted keys, no extraneous whitespace).
+    Serializes a dictionary into deterministic canonical bytes:
+    - Sorted keys
+    - No extraneous whitespace
+    - Normalizes numbers across Python and JavaScript runtimes
+    - Excludes signature field consistently
+    - UTF-8 encoded
     Crucial for tamper-evidence and consistent cryptographic hashing.
     """
-    return json.dumps(data, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    normalized = normalize_canonical_data(data)
+    return json.dumps(normalized, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
 
 
 def sign_payload(payload: Dict[str, Any], private_key: rsa.RSAPrivateKey) -> str:
@@ -242,20 +274,100 @@ def sign_payload(payload: Dict[str, Any], private_key: rsa.RSAPrivateKey) -> str
 def verify_signature(payload: Dict[str, Any], signature_b64: str, public_key: rsa.RSAPublicKey) -> bool:
     """
     Verifies the RSA-PSS signature of a payload.
+    Handles standard and URL-safe Base64 encoding and surrounding whitespace.
     Returns True if valid, False if signature or payload has been tampered with.
     """
     try:
-        signature_bytes = base64.b64decode(signature_b64)
+        if not isinstance(signature_b64, str) or not signature_b64.strip():
+            return False
+        sig_str = signature_b64.strip()
+        padding_needed = len(sig_str) % 4
+        if padding_needed:
+            sig_str += '=' * (4 - padding_needed)
+
+        try:
+            signature_bytes = base64.b64decode(sig_str)
+        except Exception:
+            signature_bytes = base64.urlsafe_b64decode(sig_str)
+
         message_bytes = canonical_json_bytes(payload)
-        public_key.verify(
-            signature_bytes,
-            message_bytes,
-            padding.PSS(
-                mgf=padding.MGF1(hashes.SHA256()),
-                salt_length=padding.PSS.MAX_LENGTH
-            ),
-            hashes.SHA256()
+        pss_padding = padding.PSS(
+            mgf=padding.MGF1(hashes.SHA256()),
+            salt_length=padding.PSS.MAX_LENGTH
         )
-        return True
+        try:
+            public_key.verify(signature_bytes, message_bytes, pss_padding, hashes.SHA256())
+            return True
+        except InvalidSignature:
+            # Fallback for legacy tokens signed prior to float normalization
+            try:
+                legacy_bytes = json.dumps(payload, sort_keys=True, separators=(',', ':')).encode('utf-8')
+                public_key.verify(signature_bytes, legacy_bytes, pss_padding, hashes.SHA256())
+                return True
+            except Exception:
+                return False
     except (InvalidSignature, Exception):
         return False
+
+
+def clean_token_json_str(raw_str: str) -> str:
+    """Strips leading/trailing whitespace and optional markdown code fences from JSON string."""
+    s = raw_str.strip()
+    if s.startswith("```"):
+        lines = s.splitlines()
+        # Remove opening fence (``` or ```json)
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        # Remove closing fence (```)
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        s = "\n".join(lines).strip()
+    return s
+
+
+def parse_token_package(raw_input: Any) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """
+    Safely parses and extracts a token package from a string or dict.
+    Handles:
+    - Harmless whitespace and markdown code fences
+    - Outer wrapper dictionaries like {"token_package": ...}
+    - Flattened tokens with top-level payload attributes + signature
+    Returns (token_package, None) on success, or (None, error_message) on failure.
+    """
+    if isinstance(raw_input, str):
+        cleaned = clean_token_json_str(raw_input)
+        if not cleaned:
+            return None, "Empty token input provided."
+        try:
+            parsed = json.loads(cleaned)
+        except json.JSONDecodeError as e:
+            return None, f"Malformed JSON: {e.msg} (at line {e.lineno}, column {e.colno})"
+    elif isinstance(raw_input, dict):
+        parsed = raw_input
+    else:
+        return None, f"Expected JSON string or object, got {type(raw_input).__name__}."
+
+    if not isinstance(parsed, dict):
+        return None, "Parsed token JSON must be an object/dictionary."
+
+    # Unwrap if nested under 'token_package'
+    if "token_package" in parsed and isinstance(parsed["token_package"], dict):
+        parsed = parsed["token_package"]
+
+    # Check if payload and signature are present directly
+    if "payload" in parsed and isinstance(parsed["payload"], dict) and "signature" in parsed:
+        return parsed, None
+
+    # Check if payload attributes are flattened at top level along with signature
+    required_payload_fields = ["tokenID", "payerID", "payeeID", "amount", "timestamp"]
+    if all(k in parsed for k in required_payload_fields) and "signature" in parsed:
+        payload = {k: parsed[k] for k in required_payload_fields}
+        token_pkg = {
+            "payload": payload,
+            "signature": parsed["signature"]
+        }
+        if "payer_public_key" in parsed:
+            token_pkg["payer_public_key"] = parsed["payer_public_key"]
+        return token_pkg, None
+
+    return None, "Invalid token structure: missing required 'payload' and 'signature' fields."

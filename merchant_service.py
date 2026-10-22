@@ -194,13 +194,22 @@ def create_merchant_app(
         Executes local RSA signature verification and persistent queueing in < 1ms.
         Completely autonomous: works when Bank and Payer are unreachable.
         """
-        data = request.get_json(silent=True) or {}
-        token_pkg = data.get("token_package")
+        raw_text = request.get_data(as_text=True)
+        data = request.get_json(silent=True)
+        token_pkg = None
+        if isinstance(data, dict):
+            if "token_package" in data:
+                token_pkg = data["token_package"]
+            else:
+                token_pkg = data
+        elif raw_text and raw_text.strip():
+            token_pkg = raw_text
+
         if not token_pkg:
             return jsonify({
                 "accepted": False,
                 "status": "REJECTED",
-                "reason": "Missing token_package in request body."
+                "reason": "Missing payment token in request body."
             }), 400
 
         result = state["merchant"].verify_and_accept_token(token_pkg)

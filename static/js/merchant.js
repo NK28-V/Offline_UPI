@@ -1,111 +1,76 @@
 /**
- * Offline UPI Payment Simulator — Merchant POS Terminal Controller
- * Handles local offline signature verification, persistent queue display,
- * and delayed synchronization with the central bank ledger.
+ * Offline UPI Payment Simulator — Simple Merchant Dashboard Controller
+ * Handles pasting payment JSON, local verification, prominent outcome display,
+ * and bank sync.
  */
 
 document.addEventListener("DOMContentLoaded", () => {
-  // Initialize shared common components
   if (window.OfflineUPI) {
     window.OfflineUPI.initNavigation("merchant");
-    window.OfflineUPI.initDemoGuide();
-    window.OfflineUPI.initResetModal(loadMerchantStatus);
   }
 
   loadMerchantStatus();
 
-  // Button: Verify Token
   const btnVerify = document.getElementById("btn-verify-token");
   if (btnVerify) {
     btnVerify.addEventListener("click", handleVerifyToken);
   }
 
-  // Button: Sync with Bank Switch
   const btnSync = document.getElementById("btn-sync-bank");
   if (btnSync) {
     btnSync.addEventListener("click", handleSyncWithBank);
   }
 
-  // Button: Refresh Queue
   const btnRefresh = document.getElementById("btn-refresh-queue");
   if (btnRefresh) {
     btnRefresh.addEventListener("click", loadMerchantStatus);
   }
-
-  // Button: Purge Settled
-  const btnPurge = document.getElementById("btn-purge-settled");
-  if (btnPurge) {
-    btnPurge.addEventListener("click", handlePurgeSettled);
-  }
 });
 
-function switchInputTab(tab) {
-  const pasteTab = document.getElementById("tab-paste");
-  const fileTab = document.getElementById("tab-file");
-  const btnPaste = document.getElementById("tab-btn-paste");
-  const btnFile = document.getElementById("tab-btn-file");
-
-  if (tab === "paste") {
-    if (pasteTab) pasteTab.style.display = "block";
-    if (fileTab) fileTab.style.display = "none";
-    if (btnPaste) btnPaste.classList.add("active");
-    if (btnFile) btnFile.classList.remove("active");
-  } else {
-    if (pasteTab) pasteTab.style.display = "none";
-    if (fileTab) fileTab.style.display = "block";
-    if (btnPaste) btnPaste.classList.remove("active");
-    if (btnFile) btnFile.classList.add("active");
+function cleanTokenInput(raw) {
+  let s = (raw || "").trim();
+  if (s.startsWith("```")) {
+    const lines = s.split("\n");
+    if (lines.length > 0 && lines[0].startsWith("```")) lines.shift();
+    if (lines.length > 0 && lines[lines.length - 1].trim().startsWith("```")) lines.pop();
+    s = lines.join("\n").trim();
   }
+  return s;
 }
 
 async function loadMerchantStatus() {
   try {
     const res = await fetch("/api/merchant/status");
-    if (!res.ok) throw new Error("Failed to load merchant POS status");
+    if (!res.ok) throw new Error("Failed to load merchant status");
     const data = await res.json();
 
     const merchantIdEl = document.getElementById("merchant-id-display");
     if (merchantIdEl) merchantIdEl.innerText = data.merchant_id || "merchant_bob@upi";
 
-    document.getElementById("stat-total-count").innerText = data.total_queued || 0;
-    document.getElementById("stat-pending-count").innerText = data.pending_sync || 0;
-    document.getElementById("stat-pending-amount").innerText = `₹${(data.pending_sync_amount || 0).toFixed(2)}`;
-    document.getElementById("stat-settled-count").innerText = data.settled || 0;
+    const pendingCount = data.pending_sync || 0;
+    const pendingAmount = data.pending_sync_amount || 0.0;
+    const settledCount = data.settled || 0;
 
-    // Connectivity pill
-    const pill = document.getElementById("merchant-conn-pill");
-    if (pill) {
-      if (data.bank_reachable) {
-        pill.innerHTML = '<span class="status-pill status-online"><span class="status-dot"></span> Bank Switch Reachable (Online)</span>';
+    const summaryText = document.getElementById("queue-summary-text");
+    if (summaryText) {
+      if (pendingCount > 0) {
+        summaryText.innerHTML = `<strong>${pendingCount} payment(s) pending sync</strong> (Total: ₹${pendingAmount.toFixed(2)}) &bull; ${settledCount} settled with bank`;
       } else {
-        pill.innerHTML = '<span class="status-pill status-offline"><span class="status-dot"></span> Bank Switch Offline (Queuing Locally)</span>';
+        summaryText.innerText = `All payments are settled with the bank (${settledCount} total). No pending payments.`;
       }
     }
 
-    // Queue summary text
-    const queueSummary = document.getElementById("queue-summary-text");
-    if (queueSummary) {
-      queueSummary.innerText = `${data.pending_sync || 0} tokens pending (₹${(data.pending_sync_amount || 0).toFixed(2)})`;
-    }
-
-    // Sync button state
     const syncBtn = document.getElementById("btn-sync-bank");
-    const syncIndicator = document.getElementById("sync-status-indicator");
-    if (syncBtn && syncIndicator) {
-      if ((data.pending_sync || 0) > 0) {
+    if (syncBtn) {
+      if (pendingCount > 0) {
         syncBtn.disabled = false;
-        syncBtn.innerText = `🌐 Sync ${data.pending_sync} Queued Payment(s) with Bank Switch`;
-        syncIndicator.className = "badge badge-pending";
-        syncIndicator.innerText = `${data.pending_sync} PENDING SYNC`;
+        syncBtn.innerText = `Sync with Bank (${pendingCount} Pending)`;
       } else {
         syncBtn.disabled = true;
-        syncBtn.innerText = "✓ Local Queue Up to Date (0 Pending)";
-        syncIndicator.className = "badge badge-settled";
-        syncIndicator.innerText = "ALL SETTLED";
+        syncBtn.innerText = "Sync with Bank (0 Pending)";
       }
     }
 
-    // Render table
     renderMerchantQueue(data.queue || []);
   } catch (err) {
     console.error("Error loading merchant status:", err);
@@ -116,94 +81,116 @@ async function handleVerifyToken() {
   const resultBox = document.getElementById("verification-result-box");
   if (resultBox) resultBox.style.display = "none";
 
-  const isPasteActive = document.getElementById("tab-paste").style.display !== "none";
-  let tokenPackage = null;
+  const inputEl = document.getElementById("token-paste-input");
+  const rawText = cleanTokenInput(inputEl ? inputEl.value : "");
 
-  if (isPasteActive) {
-    const rawText = document.getElementById("token-paste-input").value.trim();
-    if (!rawText) {
-      showVerificationResult(false, "Please paste a signed token JSON string from the Payer Device.");
-      return;
-    }
-    try {
-      tokenPackage = JSON.parse(rawText);
-    } catch (parseErr) {
-      showVerificationResult(false, "Invalid JSON format: " + parseErr.message);
-      return;
-    }
-    executeTokenVerification(tokenPackage);
-  } else {
-    // Read from file upload
-    const fileInput = document.getElementById("token-file-input");
-    if (!fileInput.files || fileInput.files.length === 0) {
-      showVerificationResult(false, "Please select an offline token JSON file.");
-      return;
-    }
-    const file = fileInput.files[0];
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      try {
-        tokenPackage = JSON.parse(event.target.result);
-        executeTokenVerification(tokenPackage);
-      } catch (parseErr) {
-        showVerificationResult(false, "Invalid JSON in uploaded file: " + parseErr.message);
-      }
-    };
-    reader.readAsText(file);
+  if (!rawText) {
+    showErrorResult("Please paste the payment JSON generated by the Payer.");
+    return;
   }
-}
 
-async function executeTokenVerification(tokenPkg) {
-  const resultBox = document.getElementById("verification-result-box");
+  let tokenPackage = null;
+  try {
+    tokenPackage = JSON.parse(rawText);
+  } catch (parseErr) {
+    showErrorResult(`Malformed JSON: The pasted text is not valid JSON. ${parseErr.message}`);
+    return;
+  }
+
+  const btnVerify = document.getElementById("btn-verify-token");
+  if (btnVerify) {
+    btnVerify.disabled = true;
+    btnVerify.innerText = "Verifying Signature...";
+  }
+
   try {
     const res = await fetch("/api/merchant/receive", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token_package: tokenPkg })
+      body: JSON.stringify({ token_package: tokenPackage })
     });
     const data = await res.json();
 
     if (data.accepted) {
-      const latMs = data.verification_time_ms ? data.verification_time_ms.toFixed(2) : "0.00";
-      showVerificationResult(
-        true,
-        `✓ Offline Token Accepted & Verified in ${latMs} ms (Sub-Second Latency NFR Met)! Stored in local SQLite queue as 'Pending Sync'.`
-      );
-      // Clear inputs
-      document.getElementById("token-paste-input").value = "";
-      const fileInput = document.getElementById("token-file-input");
-      if (fileInput) fileInput.value = "";
+      showSuccessResult({
+        amount: data.amount,
+        merchant: data.payee_id || "merchant_bob@upi",
+        tokenId: data.token_id,
+        status: "Verified Locally (Pending Bank Sync)"
+      });
+      if (inputEl) inputEl.value = "";
     } else {
-      showVerificationResult(false, `❌ Token Rejected: ${data.reason}`);
+      showErrorResult(data.reason || "Payment verification failed.");
     }
 
     loadMerchantStatus();
   } catch (err) {
-    showVerificationResult(false, "Communication error: " + err.message);
+    showErrorResult("Communication error: " + err.message);
+  } finally {
+    if (btnVerify) {
+      btnVerify.disabled = false;
+      btnVerify.innerText = "Verify Payment";
+    }
   }
 }
 
-function showVerificationResult(isSuccess, message) {
+function showSuccessResult(info) {
   const box = document.getElementById("verification-result-box");
   if (!box) return;
-  box.className = isSuccess ? "alert alert-success" : "alert alert-danger";
-  box.innerHTML = message;
+
+  const amt = Number(info.amount || 0).toFixed(2);
+  const merchant = info.merchant || "merchant_bob@upi";
+  const tid = info.tokenId || "—";
+  const status = info.status || "Verified Offline";
+
+  box.className = "result-banner result-success";
+  box.innerHTML = `
+    <div class="result-title">
+      ✓ Payment Verified Successfully
+    </div>
+    <div class="result-row">
+      <span>Amount Received:</span>
+      <strong style="font-size: 24px; color: var(--success);">₹${amt}</strong>
+    </div>
+    <div class="result-row">
+      <span>Merchant:</span>
+      <strong>${merchant}</strong>
+    </div>
+    <div class="result-row">
+      <span>Transaction ID:</span>
+      <code>${tid}</code>
+    </div>
+    <div class="result-row">
+      <span>Status:</span>
+      <span class="badge badge-pending">${status}</span>
+    </div>
+  `;
+  box.style.display = "block";
+}
+
+function showErrorResult(reason) {
+  const box = document.getElementById("verification-result-box");
+  if (!box) return;
+
+  box.className = "result-banner result-danger";
+  box.innerHTML = `
+    <div class="result-title">
+      ✕ Payment Rejected
+    </div>
+    <p style="font-size: 18px; margin-top: 8px;">
+      ${reason}
+    </p>
+  `;
   box.style.display = "block";
 }
 
 async function handleSyncWithBank() {
   const syncBtn = document.getElementById("btn-sync-bank");
   const reportBox = document.getElementById("sync-report-box");
-  const indicator = document.getElementById("sync-status-indicator");
 
   if (syncBtn) {
     syncBtn.disabled = true;
-    syncBtn.innerText = "⏳ Transmitting Queued Tokens to Bank Switch...";
-  }
-
-  if (indicator) {
-    indicator.className = "badge badge-created";
-    indicator.innerText = "SYNCING";
+    syncBtn.innerText = "Syncing with Bank...";
   }
 
   try {
@@ -212,80 +199,52 @@ async function handleSyncWithBank() {
 
     if (res.status === 503) {
       if (reportBox) {
-        reportBox.className = "alert alert-warning";
-        reportBox.innerHTML = `⚠️ <strong>Bank Network Unavailable:</strong> ${data.message || "Central banking switch is currently offline. Queued tokens safely retained in local SQLite database."}`;
-        reportBox.style.display = "block";
-      }
-      if (indicator) {
-        indicator.className = "badge badge-pending";
-        indicator.innerText = "PENDING SYNC";
-      }
-    } else if (res.ok) {
-      const settledCount = data.settled_count || 0;
-      const dupCount = data.duplicate_count || 0;
-      const flaggedCount = data.flagged_count || 0;
-      const procTime = data.processing_time_ms ? data.processing_time_ms.toFixed(2) : "0.00";
-
-      if (reportBox) {
-        reportBox.className = "alert alert-success";
+        reportBox.className = "result-banner result-danger";
         reportBox.innerHTML = `
-          <strong>✓ Synchronization Completed with Bank Switch:</strong><br>
-          &bull; Settled Payments: <strong>${settledCount}</strong><br>
-          &bull; Duplicates Blocked: <strong>${dupCount}</strong><br>
-          &bull; Flagged for 24h Review: <strong>${flaggedCount}</strong><br>
-          &bull; Batch Settlement Latency: <strong>${procTime} ms</strong>
+          <div class="result-title">⚠️ Bank Switch Offline</div>
+          <p>${data.message || "Central banking switch is unreachable. Pending payments are retained locally in SQLite."}</p>
         `;
         reportBox.style.display = "block";
       }
-      if (indicator) {
-        indicator.className = "badge badge-settled";
-        indicator.innerText = "SYNC COMPLETE";
+    } else if (res.ok) {
+      const settledCount = data.settled_count || 0;
+      if (reportBox) {
+        reportBox.className = "result-banner result-success";
+        reportBox.innerHTML = `
+          <div class="result-title">✓ Synced with Bank Successfully</div>
+          <p><strong>${settledCount} payment(s) settled</strong> and committed to the bank ledger.</p>
+        `;
+        reportBox.style.display = "block";
       }
     } else {
       if (reportBox) {
-        reportBox.className = "alert alert-danger";
-        reportBox.innerText = `Sync Error: ${data.error || "Unknown server error."}`;
+        reportBox.className = "result-banner result-danger";
+        reportBox.innerHTML = `<p>Sync error: ${data.error || "Unknown server error."}</p>`;
         reportBox.style.display = "block";
-      }
-      if (indicator) {
-        indicator.className = "badge badge-rejected";
-        indicator.innerText = "SYNC FAILED";
       }
     }
 
     loadMerchantStatus();
   } catch (err) {
     if (reportBox) {
-      reportBox.className = "alert alert-warning";
-      reportBox.innerText = `Bank connection error: ${err.message}. Queued offline payments safely retained locally.`;
+      reportBox.className = "result-banner result-danger";
+      reportBox.innerHTML = `<p>Network error: ${err.message}</p>`;
       reportBox.style.display = "block";
     }
   } finally {
     if (syncBtn) {
       syncBtn.disabled = false;
-      syncBtn.innerText = "🌐 Sync Queued Payments with Bank Switch";
+      syncBtn.innerText = "Sync with Bank";
     }
   }
 }
 
-async function handlePurgeSettled() {
-  if (!confirm("Purge settled payments from the active local POS queue view? (Does not affect bank records)")) return;
-  try {
-    const res = await fetch("/api/merchant/purge_settled", { method: "POST" });
-    if (res.ok) {
-      loadMerchantStatus();
-    }
-  } catch (err) {
-    console.error(err);
-  }
-}
-
-function renderMerchantQueue(queue) {
+function renderMerchantQueue(queueList) {
   const tbody = document.getElementById("merchant-queue-tbody");
-  const emptyState = document.getElementById("merchant-empty-state");
+  const emptyState = document.getElementById("queue-empty-state");
   if (!tbody) return;
 
-  if (!queue || queue.length === 0) {
+  if (!queueList || queueList.length === 0) {
     tbody.innerHTML = "";
     if (emptyState) emptyState.style.display = "block";
     return;
@@ -293,25 +252,19 @@ function renderMerchantQueue(queue) {
 
   if (emptyState) emptyState.style.display = "none";
 
-  tbody.innerHTML = queue.map(item => {
-    const isSettled = item.status === "Settled";
-    const statusBadgeClass = isSettled ? "badge-settled" : "badge-pending";
-    const statusLabel = isSettled ? "SETTLED BY BANK" : "PENDING SYNC (VERIFIED)";
+  tbody.innerHTML = queueList.map(item => {
+    const statusBadgeClass =
+      item.status === "Settled" ? "badge-settled" : "badge-pending";
 
-    const timeFormatted = item.received_at ? new Date(item.received_at * 1000).toLocaleTimeString() : "N/A";
-    const latencyFormatted = item.verification_time_ms ? `${item.verification_time_ms.toFixed(2)} ms` : "N/A";
-    const shortId = item.token_id ? item.token_id.slice(0, 8) : "—";
+    const shortId = item.token_id ? item.token_id.slice(0, 8) + "..." : "—";
+    const amt = Number(item.amount || 0).toFixed(2);
 
     return `
       <tr>
-        <td>
-          <span class="token-code" title="${item.token_id}">${shortId}...</span>
-        </td>
+        <td><code>${shortId}</code></td>
         <td><strong>${item.payer_id}</strong></td>
-        <td><strong style="color: var(--text-primary);">₹${item.amount.toFixed(2)}</strong></td>
-        <td>${timeFormatted}</td>
-        <td><span style="font-family: monospace; font-size: 0.82rem; color: var(--success); font-weight: 600;">⚡ ${latencyFormatted}</span></td>
-        <td><span class="badge ${statusBadgeClass}">${statusLabel}</span></td>
+        <td><strong>₹${amt}</strong></td>
+        <td><span class="badge ${statusBadgeClass}">${item.status}</span></td>
       </tr>
     `;
   }).join("");

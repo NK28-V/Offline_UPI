@@ -147,9 +147,13 @@ async function loadBankStatus() {
     const pendingCount = data.pending_merchant_syncs || 0;
     const pendingAmount = data.pending_merchant_amount || 0.0;
 
+    const syncBanner = document.getElementById("merchant-sync-banner");
+    if (syncBanner) {
+      syncBanner.style.display = pendingCount > 0 ? "block" : "none";
+    }
     if (pendingCount > 0) {
       if (syncSummary) {
-        syncSummary.innerHTML = `⚠️ <strong>${pendingCount} offline transaction(s) waiting for bank sync</strong> (Total queued value: <strong>₹${pendingAmount.toFixed(2)}</strong>).`;
+        syncSummary.innerHTML = `<strong>${pendingCount} offline payment(s) waiting for bank sync</strong> (Total value: <strong>₹${pendingAmount.toFixed(2)}</strong>).`;
       }
       if (syncBadge) {
         syncBadge.className = "badge badge-pending";
@@ -374,24 +378,16 @@ function renderMasterLedger() {
       item.status === "SETTLED" ? "badge-settled" :
       item.status === "FLAGGED_FOR_REVIEW" ? "badge-flagged" : "badge-rejected";
 
-    const settledDate = item.settled_at ? new Date(item.settled_at * 1000).toLocaleTimeString() : "N/A";
-    const ageText = item.token_age_hours ? `${item.token_age_hours.toFixed(1)}h` : "< 1h";
-    const auditNotes = item.review_reason || "Verified & Settled";
-    const shortId = item.token_id ? item.token_id.slice(0, 8) : "—";
+    const shortId = item.token_id ? item.token_id.slice(0, 8) + "..." : "—";
+    const amt = Number(item.amount || 0).toFixed(2);
+    const merchant = item.payee_id || "merchant_bob@upi";
 
     return `
       <tr>
-        <td>
-          <span class="token-code" title="${item.token_id}">${shortId}...</span>
-          <button class="btn btn-outline btn-sm" style="padding: 1px 5px; font-size: 0.7rem; margin-left: 4px;" onclick="copyTokenId('${item.token_id}')" title="Copy Token ID">📋</button>
-        </td>
-        <td><strong>${item.payer_id}</strong></td>
-        <td><code>${item.payee_id}</code></td>
-        <td><strong style="color: var(--text-primary);">₹${item.amount.toFixed(2)}</strong></td>
-        <td>${ageText}</td>
-        <td>${settledDate}</td>
+        <td><code>${shortId}</code></td>
+        <td><strong>${merchant}</strong></td>
+        <td><strong>₹${amt}</strong></td>
         <td><span class="badge ${statusBadgeClass}">${item.status}</span></td>
-        <td style="font-size: 0.8rem; color: var(--text-secondary); max-width: 220px;">${auditNotes}</td>
       </tr>
     `;
   }).join("");

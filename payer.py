@@ -263,7 +263,7 @@ class PayerDevice:
             )
 
         token_id = str(uuid.uuid4())
-        timestamp = time.time()
+        timestamp = round(time.time(), 3)
         amt_inr = round(amt_paise / 100.0, 2)
 
         payload = {

@@ -11,7 +11,7 @@ import json
 import re
 import os
 from typing import Dict, Any, List, Optional
-from crypto_utils import load_public_key_from_pem, verify_signature, validate_token_payload
+from crypto_utils import load_public_key_from_pem, verify_signature, validate_token_payload, parse_token_package
 
 
 class MerchantDevice:
@@ -102,15 +102,17 @@ class MerchantDevice:
         """
         start_time = time.perf_counter()
 
-        if not isinstance(token_package, dict):
+        parsed_pkg, parse_err = parse_token_package(token_package)
+        if parse_err:
             return {
                 "accepted": False,
                 "token_id": None,
                 "status": "REJECTED",
-                "reason": "Token package must be a dictionary.",
+                "reason": parse_err,
                 "verification_time_ms": (time.perf_counter() - start_time) * 1000.0
             }
 
+        token_package = parsed_pkg
         payload = token_package.get("payload")
         signature_b64 = token_package.get("signature")
 

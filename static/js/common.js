@@ -34,7 +34,7 @@
    * Initializes the common top navigation bar links.
    */
   function initNavigation(activeRole) {
-    const navLinks = document.querySelectorAll(".nav-link[data-role]");
+    const navLinks = document.querySelectorAll(".nav-link[data-role], .nav-item[data-role]");
     navLinks.forEach(link => {
       const role = link.getAttribute("data-role");
       link.href = resolveServiceUrl(role);

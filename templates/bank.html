@@ -3,428 +3,138 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Bank Dashboard — Offline UPI Payment Simulator</title>
+  <title>Bank Dashboard — Central Settlement Switch</title>
   <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
-  <!-- Top Navigation Bar -->
-  <header class="navbar">
-    <a href="/" class="brand">
-      <span>Offline UPI Payment Simulator</span>
-      <span class="brand-badge">Bank Switch</span>
-    </a>
-    <nav class="nav-links">
-      <a href="/payer" class="nav-link" data-role="payer">📱 Payer Dashboard</a>
-      <a href="/merchant" class="nav-link" data-role="merchant">🏪 Merchant Dashboard</a>
-      <a href="/bank" class="nav-link active" data-role="bank">🏦 Bank Dashboard</a>
-    </nav>
-    <div class="navbar-actions">
-      <button class="btn-guide-nav" id="btn-toggle-demo-guide" type="button" aria-expanded="false">
-        📖 How to Run a Demo
-      </button>
-      <button class="btn-reset-nav" id="btn-open-reset-modal" type="button">
-        🔄 Reset Demo Data
-      </button>
+  <!-- Large Obvious Navigation Bar -->
+  <header class="top-nav">
+    <div class="nav-inner">
+      <a href="/bank" class="nav-brand">
+        <span>Offline UPI</span>
+        <span class="nav-brand-badge">Bank Switch (Port 5003)</span>
+      </a>
+      <nav class="nav-menu">
+        <a href="http://localhost:5001/payer" class="nav-item" data-role="payer">Payer</a>
+        <a href="http://localhost:5002/merchant" class="nav-item" data-role="merchant">Merchant</a>
+        <a href="http://localhost:5003/bank" class="nav-item active" data-role="bank">Bank</a>
+      </nav>
     </div>
   </header>
 
   <main class="app-container">
-    <!-- Persistent Guided Demo Stepper Panel (Collapsible) -->
-    <div class="demo-guide-card" id="demo-guide-panel" style="display: none;">
-      <div class="demo-guide-header">
-        <div class="demo-guide-title">
-          <span>🚀 Interactive Demo Workflow — Offline UPI Payment Flow</span>
-        </div>
-        <button type="button" class="btn btn-outline btn-sm" id="btn-close-demo-guide">✕ Close Guide</button>
-      </div>
-      <p style="font-size: 0.88rem; color: var(--text-secondary); margin-bottom: 8px;">
-        Follow these 6 steps to demonstrate genuine offline payment generation, sub-second local merchant verification, and delayed central bank settlement:
-      </p>
-      <div class="demo-stepper-grid">
-        <div class="demo-step-item">
-          <div class="demo-step-number">1</div>
-          <div class="demo-step-title">Generate Payment (Payer)</div>
-          <div class="demo-step-desc">Open Payer Dashboard. Enter amount (max ₹500 cap) and merchant ID. Payer creates and signs an offline token with RSA-2048.</div>
-        </div>
-        <div class="demo-step-item">
-          <div class="demo-step-number">2</div>
-          <div class="demo-step-title">Transfer Token</div>
-          <div class="demo-step-desc">Copy token JSON or scan QR code to simulate BLE/NFC/soundwave offline transfer from Payer to Merchant device.</div>
-        </div>
-        <div class="demo-step-item">
-          <div class="demo-step-number">3</div>
-          <div class="demo-step-title">Verify & Accept (Merchant)</div>
-          <div class="demo-step-desc">Paste or upload token. Merchant locally verifies RSA signature in &lt; 1 sec using pre-provisioned trusted public keys. Zero bank dependency!</div>
-        </div>
-        <div class="demo-step-item">
-          <div class="demo-step-number">4</div>
-          <div class="demo-step-title">Queue in Local SQLite</div>
-          <div class="demo-step-desc">Accepted payment enters merchant's local queue with status <code>Pending Sync</code>. It is a valid offline IOU awaiting bank clearance.</div>
-        </div>
-        <div class="demo-step-item">
-          <div class="demo-step-number">5</div>
-          <div class="demo-step-title">Sync with Bank Switch</div>
-          <div class="demo-step-desc">When network connectivity is available, merchant transmits queued tokens to the Bank Switch for final settlement.</div>
-        </div>
-        <div class="demo-step-item">
-          <div class="demo-step-number">6</div>
-          <div class="demo-step-title">Bank Settlement & Ledger</div>
-          <div class="demo-step-desc">Bank validates batch, atomically catches duplicates via SQLite SAVEPOINTs, issues signed receipts, and records in central ledger.</div>
-        </div>
-      </div>
-      <div class="demo-outage-note">
-        <strong>💡 Demonstrating Bank Outages:</strong> Click "Simulate Outage" in the Simulation Lab below. Then create and accept payments on Payer and Merchant devices to prove 100% offline functionality. When connectivity is restored, sync the queue to settle all transactions!
-      </div>
-    </div>
-
-    <!-- Page Header -->
-    <div class="page-header">
+    <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; margin-bottom: 24px;">
       <div>
-        <h1 class="page-title">🏦 Central Bank Core Switch & Settlement Network</h1>
-        <p class="page-subtitle">Central Settlement Switch &bull; Authoritative Public Key Registry &bull; Double-Spend Defense &bull; Stale Token Audit</p>
+        <h1 class="page-title" style="margin-bottom: 4px;">Bank Dashboard</h1>
+        <p class="page-subtitle" style="margin-bottom: 0;">Central Settlement Ledger &amp; Core Switch</p>
       </div>
       <div>
-        <span class="status-pill status-online" id="bank-status-pill"><span class="status-dot"></span> Core Switch Active (Online)</span>
+        <button type="button" id="btn-refresh-ledger" class="btn-secondary">
+          Refresh Transactions
+        </button>
       </div>
     </div>
 
-    <!-- =====================================================================
-         SECTION A: BANK OVERVIEW
-         ===================================================================== -->
-    <div style="margin-bottom: 24px;">
-      <h2 style="font-size: 1.15rem; font-weight: 700; color: var(--text-primary); margin-bottom: 12px; display: flex; align-items: center; gap: 8px;">
-        <span>📊 Section A: Bank Overview & Core Metrics</span>
-      </h2>
-      <div class="grid-4">
-        <div class="stat-card">
-          <div class="stat-label">Total Transactions Received</div>
-          <div class="stat-value" id="stat-total-received">0</div>
-          <div class="stat-subtext">Cumulative evaluated tokens</div>
-        </div>
+    <!-- 4 Large Summary Cards -->
+    <div class="stats-grid">
+      <div class="stat-box">
+        <div class="stat-box-label">Transactions Received</div>
+        <div class="stat-box-number" id="stat-total-received">0</div>
+        <div class="stat-box-subtext">Total evaluated by switch</div>
+      </div>
 
-        <div class="stat-card" style="border-left: 4px solid var(--warning);">
-          <div class="stat-label">Pending Merchant Syncs</div>
-          <div class="stat-value" style="color: var(--warning);" id="stat-pending-merchant-syncs">0</div>
-          <div class="stat-subtext" id="stat-pending-merchant-amount">₹0.00 awaiting bank sync</div>
-        </div>
+      <div class="stat-box" style="border-left: 4px solid var(--warning);">
+        <div class="stat-box-label">Pending Transactions</div>
+        <div class="stat-box-number" style="color: var(--warning);" id="stat-pending-merchant-syncs">0</div>
+        <div class="stat-box-subtext" id="stat-pending-merchant-amount">Awaiting bank sync</div>
+      </div>
 
-        <div class="stat-card" style="border-left: 4px solid var(--success);">
-          <div class="stat-label">Successfully Settled</div>
-          <div class="stat-value" style="color: var(--success);" id="stat-settled-count">0</div>
-          <div class="stat-subtext" id="stat-total-value">Total Value: ₹0.00</div>
-        </div>
+      <div class="stat-box" style="border-left: 4px solid var(--success);">
+        <div class="stat-box-label">Settled Transactions</div>
+        <div class="stat-box-number" style="color: var(--success);" id="stat-settled-count">0</div>
+        <div class="stat-box-subtext" id="stat-total-value">Total settled</div>
+      </div>
 
-        <div class="stat-card" style="border-left: 4px solid var(--danger);">
-          <div class="stat-label">Duplicates & Rejections</div>
-          <div class="stat-value" style="color: var(--danger);" id="stat-duplicates-count">0</div>
-          <div class="stat-subtext" id="stat-rejection-subtext">0 duplicate / 0 invalid</div>
-        </div>
+      <div class="stat-box" style="border-left: 4px solid var(--danger);">
+        <div class="stat-box-label">Rejected Transactions</div>
+        <div class="stat-box-number" style="color: var(--danger);" id="stat-duplicates-count">0</div>
+        <div class="stat-box-subtext" id="stat-rejection-subtext">Duplicates &amp; invalid</div>
       </div>
     </div>
 
-    <!-- =====================================================================
-         SECTION B: MERCHANT SYNCHRONISATION
-         ===================================================================== -->
-    <div class="card" style="margin-bottom: 28px; border-left: 4px solid var(--warning);">
-      <div class="card-header">
-        <h2 class="card-title">🔄 Section B: Merchant Synchronisation Gateway</h2>
-        <span class="badge badge-pending" id="merchant-sync-status-badge">MERCHANT SYNC READY</span>
-      </div>
-      
-      <p style="font-size: 0.92rem; color: var(--text-secondary); line-height: 1.6; margin-bottom: 16px;">
-        <strong>How Offline UPI Works:</strong> Merchants accept and cryptographically verify customer payment tokens locally while completely disconnected from the bank. When connectivity is available, the merchant submits its queued batch to the Central Bank Switch for final settlement and receipt issuance.
-      </p>
-
-      <div style="background: var(--bg-subtle); border: 1px solid var(--border-color); border-radius: var(--radius-sm); padding: 16px; margin-bottom: 16px;">
-        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
-          <div>
-            <div style="font-size: 0.9rem; font-weight: 600; color: var(--text-primary); margin-bottom: 4px;">
-              Merchant POS Terminal Status (Bob's Tea & Snacks — <code>merchant_bob@upi</code>):
-            </div>
-            <div style="font-size: 0.85rem; color: var(--text-secondary);" id="merchant-sync-summary-text">
-              Checking pending transactions at merchant POS...
-            </div>
-          </div>
-          <div style="display: flex; gap: 10px;">
-            <button class="btn btn-primary" id="btn-sync-pending-transactions" type="button">
-              ⚡ Sync Pending Transactions Now
-            </button>
-            <button class="btn btn-outline btn-sm" id="btn-check-merchant-status" type="button">
-              🔄 Check Status
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Live Sync Outcome Box -->
-      <div id="merchant-sync-result-box" style="display: none; margin-top: 14px;"></div>
-
-      <!-- Empty state when no merchant transactions are waiting -->
-      <div id="merchant-sync-empty-state" style="display: none; padding: 14px 16px; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: var(--radius-sm); color: #166534; font-size: 0.88rem;">
-        ✓ <strong>All Merchant Transactions Synchronized:</strong> There are currently no pending payments waiting at the Merchant POS. When new offline payments are accepted, they will be listed here for settlement.
-      </div>
-    </div>
-
-    <!-- =====================================================================
-         SECTION C: TRANSACTION LEDGER
-         ===================================================================== -->
-    <div class="card" style="margin-bottom: 28px;">
-      <div class="card-header" style="flex-wrap: wrap; gap: 12px;">
+    <!-- Pending Merchant Sync Banner (if transactions waiting) -->
+    <div id="merchant-sync-banner" class="card" style="display: none; background: #fffbeb; border: 2px solid #fde68a; margin-bottom: 28px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px;">
         <div>
-          <h2 class="card-title">📑 Section C: Master Central Settlement Ledger</h2>
-          <p style="font-size: 0.82rem; color: var(--text-muted); margin-top: 2px;">
-            Authoritative bank records settled in SQLite with ACID atomic guarantees and 100% duplicate prevention.
+          <div style="font-size: 20px; font-weight: 700; color: #92400e;">Pending Transactions Waiting at Merchant</div>
+          <p id="merchant-sync-summary-text" style="font-size: 16px; color: #78350f; margin-top: 4px;">
+            Offline payments have been queued by Bob's Store.
           </p>
         </div>
-        <div style="display: flex; align-items: center; gap: 10px;">
-          <div class="filter-group">
-            <button class="filter-pill active" data-filter="ALL" type="button">All (<span id="count-filter-all">0</span>)</button>
-            <button class="filter-pill" data-filter="SETTLED" type="button">Settled (<span id="count-filter-settled">0</span>)</button>
-            <button class="filter-pill" data-filter="FLAGGED" type="button">24h Review (<span id="count-filter-flagged">0</span>)</button>
-            <button class="filter-pill" data-filter="REJECTED" type="button">Rejected (<span id="count-filter-rejected">0</span>)</button>
-          </div>
-          <button class="btn btn-outline btn-sm" id="btn-refresh-ledger" type="button">🔄 Refresh</button>
-        </div>
+        <button type="button" id="btn-sync-pending-transactions" class="btn-primary" style="width: auto; padding: 12px 24px; font-size: 17px;">
+          Sync Pending Payments Now
+        </button>
       </div>
+      <div id="merchant-sync-result-box" style="display: none; margin-top: 16px;"></div>
+    </div>
 
-      <div class="table-responsive">
-        <table class="table">
+    <!-- Simple Transaction Table -->
+    <div class="card">
+      <h2 class="card-title">Settled Transactions</h2>
+      <div class="table-wrapper">
+        <table class="simple-table">
           <thead>
             <tr>
-              <th>Token ID</th>
-              <th>Payer Reference</th>
-              <th>Merchant (Payee)</th>
+              <th>Transaction ID</th>
+              <th>Merchant</th>
               <th>Amount</th>
-              <th>Token Age</th>
-              <th>Settled At</th>
-              <th>Settlement Status</th>
-              <th>Audit Notes</th>
+              <th>Status</th>
             </tr>
           </thead>
-          <tbody id="master-ledger-tbody">
-            <!-- Dynamic rows or empty state injected by JS -->
-          </tbody>
+          <tbody id="master-ledger-tbody"></tbody>
         </table>
       </div>
-
-      <!-- Rich Empty State for Master Ledger -->
-      <div class="empty-state-box" id="ledger-empty-state" style="display: none;">
-        <div class="empty-state-icon">🏦</div>
-        <div class="empty-state-heading">No Settlements Recorded in Central Ledger Yet</div>
-        <div class="empty-state-text">
-          No offline transactions have been synchronized to the bank core switch. Complete an end-to-end payment to see real-time settlement and receipt generation:
-        </div>
-        <div class="empty-state-action">
-          <a href="/payer" data-cross-link="payer" class="btn btn-primary btn-sm">
-            📱 1. Generate Payment on Payer Device →
-          </a>
-          <a href="/merchant" data-cross-link="merchant" class="btn btn-outline btn-sm">
-            🏪 2. Open Merchant POS Terminal →
-          </a>
-        </div>
+      <div id="ledger-empty-state" class="empty-state" style="display: none;">
+        No transactions yet.
       </div>
     </div>
 
-    <!-- =====================================================================
-         SECTION D: SETTLEMENT AND RECONCILIATION
-         ===================================================================== -->
-    <div class="card" style="margin-bottom: 28px;">
-      <div class="card-header">
-        <h2 class="card-title">🛡️ Section D: Settlement & Reconciliation Lifecycle</h2>
-        <span class="badge badge-transferred">Core Banking Logic</span>
-      </div>
-      <p style="font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 16px;">
-        Every payment token processed by the Central Bank switch transitions through an explicit cryptographic state machine. The table below explains the real backend settlement rules:
-      </p>
-
-      <div class="lifecycle-grid">
-        <div class="lifecycle-card stage-received">
-          <span class="lifecycle-badge" style="color: var(--info);">Stage 1</span>
-          <div class="lifecycle-title">Received from Merchant</div>
-          <div class="lifecycle-desc">
-            Token batch submitted by merchant via authenticated HTTP. Requires valid merchant API key header (<code>X-Merchant-Key</code>) and matching payee binding.
+    <!-- Optional Collapsible Advanced Controls & Outage Simulation -->
+    <details class="technical-details">
+      <summary>Advanced Settings &amp; Network Controls</summary>
+      <div class="details-content">
+        <div style="display: flex; flex-wrap: wrap; gap: 16px; align-items: center; justify-content: space-between; padding: 12px 0;">
+          <div>
+            <div style="font-weight: 700; font-size: 17px;">Simulate Bank Network Outage</div>
+            <div style="font-size: 15px; color: var(--text-muted);">
+              Current state: <span id="current-net-badge" class="badge badge-settled">ONLINE</span>
+              <span id="bank-status-pill" style="display: none;"></span>
+            </div>
           </div>
+          <button type="button" id="btn-toggle-network" class="btn-secondary" style="font-size: 15px;">
+            <span id="net-toggle-label">Simulate Outage</span>
+          </button>
         </div>
 
-        <div class="lifecycle-card stage-verified">
-          <span class="lifecycle-badge" style="color: var(--warning);">Stage 2</span>
-          <div class="lifecycle-title">Bank Signature Verification</div>
-          <div class="lifecycle-desc">
-            Bank looks up payer public key in its authoritative registry and verifies RSA-PSS signature. Untrusted or tampered keys are rejected with zero bank trust.
+        <div style="display: flex; flex-wrap: wrap; gap: 16px; align-items: center; justify-content: space-between; padding: 16px 0; border-top: 1px solid var(--border-color);">
+          <div>
+            <div style="font-weight: 700; font-size: 17px;">Double-Spend Simulation Test</div>
+            <div style="font-size: 15px; color: var(--text-muted);">Re-submits a settled payment to verify atomic rejection.</div>
           </div>
+          <button type="button" id="btn-simulate-duplicate" class="btn-secondary" style="font-size: 15px;">
+            Simulate Double-Spend
+          </button>
         </div>
+        <div id="duplicate-sim-result" style="display: none; margin-top: 12px;"></div>
 
-        <div class="lifecycle-card stage-settled">
-          <span class="lifecycle-badge" style="color: var(--success);">Stage 3</span>
-          <div class="lifecycle-title">Settled (Receipt Issued)</div>
-          <div class="lifecycle-desc">
-            Committed atomically in SQLite. A cryptographically signed Bank Settlement Receipt is generated and returned for customer allowance restoration.
-          </div>
-        </div>
-
-        <div class="lifecycle-card stage-rejected">
-          <span class="lifecycle-badge" style="color: var(--danger);">Stage 4</span>
-          <div class="lifecycle-title">Rejected / 24h Review</div>
-          <div class="lifecycle-desc">
-            Tokens already in the ledger trigger SQLite <code>IntegrityError</code> and are caught as double-spends. Tokens older than 24h are flagged for manual review.
-          </div>
+        <div style="padding-top: 16px; border-top: 1px solid var(--border-color);">
+          <div style="font-weight: 700; font-size: 16px; margin-bottom: 8px;">Bank Public Key PEM</div>
+          <pre id="bank-pubkey-display" style="background: #ffffff; border: 1px solid var(--border-color); padding: 12px; border-radius: var(--radius-sm); font-size: 12px; max-height: 140px; overflow-y: auto;"></pre>
+          <button type="button" id="btn-copy-bank-key" class="btn-secondary" style="font-size: 14px; padding: 6px 14px; margin-top: 8px;">Copy Public Key</button>
         </div>
       </div>
-    </div>
-
-    <!-- =====================================================================
-         SECTION E: BANK ACTIONS & TECHNICAL SIMULATION LAB (COLLAPSIBLE)
-         ===================================================================== -->
-    <div class="card" style="margin-bottom: 30px;">
-      <div class="card-header collapsible-header" id="tech-lab-toggle">
-        <h2 class="card-title">
-          <span>⚙️ Section E: Technical Details, Security Registries & Simulation Lab</span>
-        </h2>
-        <span class="chevron-icon" id="tech-lab-chevron">▼</span>
-      </div>
-      <p style="font-size: 0.85rem; color: var(--text-muted); margin-top: -8px; margin-bottom: 16px;">
-        Administrative controls, cryptographic key viewers, network simulator, and double-spend test tools. Expand to inspect low-level protocols.
-      </p>
-
-      <div id="tech-lab-body" style="display: none;">
-        <!-- Network & Double-Spend Attack Lab -->
-        <div class="grid-2" style="margin-bottom: 20px;">
-          <!-- Outage Toggle -->
-          <div style="background: var(--bg-subtle); padding: 16px; border-radius: 8px; border: 1px solid var(--border-color);">
-            <div style="font-size: 0.95rem; font-weight: 600; margin-bottom: 6px;">1. Simulate Bank Network Outage</div>
-            <p style="font-size: 0.83rem; color: var(--text-secondary); margin-bottom: 12px; line-height: 1.4;">
-              Simulate a core switch maintenance window or cellular network outage. Merchant POS will safely retain queued offline payments in SQLite without losing them.
-            </p>
-            <div style="display: flex; gap: 10px; align-items: center;">
-              <button class="btn btn-outline btn-sm" id="btn-toggle-network" type="button">
-                📶 Toggle Network State (<span id="net-toggle-label">Set Offline</span>)
-              </button>
-              <span id="current-net-badge" class="badge badge-settled">ONLINE</span>
-            </div>
-          </div>
-
-          <!-- Double-Spend Simulator -->
-          <div style="background: var(--bg-subtle); padding: 16px; border-radius: 8px; border: 1px solid var(--border-color);">
-            <div style="font-size: 0.95rem; font-weight: 600; margin-bottom: 6px;">2. Simulate Double-Spend Replay Attack</div>
-            <p style="font-size: 0.83rem; color: var(--text-secondary); margin-bottom: 12px; line-height: 1.4;">
-              Attempts to re-submit an already settled token ID directly to the central switch to verify the SQLite atomic SAVEPOINT double-spend defense.
-            </p>
-            <button class="btn btn-danger btn-sm" id="btn-simulate-duplicate" type="button">
-              🚨 Trigger Double-Spend Attempt
-            </button>
-            <div id="duplicate-sim-result" style="font-size: 0.82rem; margin-top: 10px; display: none;"></div>
-          </div>
-        </div>
-
-        <!-- Trusted Payers Registry & Recent Sync Batches -->
-        <div class="grid-2" style="margin-bottom: 20px;">
-          <!-- Trusted Payers -->
-          <div style="background: var(--bg-subtle); padding: 16px; border-radius: 8px; border: 1px solid var(--border-color);">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-              <div style="font-weight: 600; font-size: 0.92rem;">🔑 Trusted Payer Public Key Registry</div>
-              <span class="badge badge-settled" id="trusted-payers-count">1 Registered</span>
-            </div>
-            <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 10px;">
-              Pre-provisioned registry. Incoming offline tokens must match a registered payer's public key.
-            </p>
-            <div class="table-responsive">
-              <table class="table" style="font-size: 0.8rem;">
-                <thead>
-                  <tr>
-                    <th>Payer ID</th>
-                    <th>Public Key (RSA-2048)</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody id="trusted-payers-tbody">
-                  <!-- Injected dynamically -->
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          <!-- Sync Batches Log -->
-          <div style="background: var(--bg-subtle); padding: 16px; border-radius: 8px; border: 1px solid var(--border-color);">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-              <div style="font-weight: 600; font-size: 0.92rem;">📦 Recent Sync Batches Audit Log</div>
-              <span class="badge badge-created">Audit Trail</span>
-            </div>
-            <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 10px;">
-              Audit log of batches processed by the Central Switch from authorized merchants.
-            </p>
-            <div class="table-responsive">
-              <table class="table" style="font-size: 0.8rem;">
-                <thead>
-                  <tr>
-                    <th>Batch ID</th>
-                    <th>Merchant</th>
-                    <th>Tokens</th>
-                    <th>Settled</th>
-                    <th>Dups</th>
-                    <th>Flagged</th>
-                  </tr>
-                </thead>
-                <tbody id="sync-batches-tbody">
-                  <!-- Injected dynamically -->
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-
-        <!-- Bank RSA Key Viewer & Demo Sample Data Loader -->
-        <div style="background: var(--bg-subtle); padding: 16px; border-radius: 8px; border: 1px solid var(--border-color);">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-wrap: wrap; gap: 8px;">
-            <div>
-              <div style="font-weight: 600; font-size: 0.92rem;">🏛️ Bank Core RSA-2048 Public Key</div>
-              <p style="font-size: 0.8rem; color: var(--text-secondary);">
-                Used by customers and merchant terminals to verify Bank-signed Settlement Receipts.
-              </p>
-            </div>
-            <div style="display: flex; gap: 8px;">
-              <button class="btn btn-outline btn-sm" id="btn-copy-bank-key" type="button">📋 Copy Public Key PEM</button>
-              <button class="btn btn-outline btn-sm" id="btn-load-sample-data" type="button">📥 Load Sample Demo Data</button>
-            </div>
-          </div>
-          <pre id="bank-pubkey-display" style="background: #ffffff; border: 1px solid var(--border-color); padding: 10px; border-radius: 6px; font-size: 0.75rem; overflow-x: auto; max-height: 120px; color: var(--text-secondary);">Loading Bank RSA Public Key...</pre>
-          <div id="sample-data-result" style="display: none; margin-top: 10px;"></div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Footer -->
-    <footer class="footer">
-      <p>Offline UPI Payment Simulator &bull; Central Bank Core Switch &bull; Port 5003 &bull; SQLite ACID Engine &bull; Zero External NPCI/API Dependency</p>
-    </footer>
+    </details>
   </main>
-
-  <!-- =====================================================================
-       RESET DEMO DATA CONFIRMATION MODAL
-       ===================================================================== -->
-  <div class="modal-overlay" id="reset-demo-modal" style="display: none;">
-    <div class="modal-card">
-      <div class="modal-header">
-        <div style="font-size: 1.5rem;">⚠️</div>
-        <div class="modal-title">Confirm Demo Data Reset</div>
-      </div>
-      <div class="modal-body">
-        <p>Are you sure you want to reset demo data across all services? This will clear disposable test records so you can start a clean, empty demonstration:</p>
-        <ul>
-          <li><strong>Payer Device:</strong> Resets spend allowance to ₹0.00 / ₹500.00 cap and clears outstanding tokens.</li>
-          <li><strong>Merchant POS:</strong> Clears all pending and settled transactions from local queue.</li>
-          <li><strong>Bank Switch:</strong> Clears settled tokens ledger, settlement receipts, and sync audit logs.</li>
-        </ul>
-        <div style="background: #f0fdf4; border: 1px solid #bbf7d0; padding: 10px 12px; border-radius: var(--radius-sm); font-size: 0.82rem; color: #166534; margin-top: 12px;">
-          ✓ <strong>Preserved Configuration:</strong> Customer and Bank RSA cryptographic keys, trusted payer registries (<code>alice@upi</code>), merchant credentials (<code>merchant_bob@upi</code>), and database schemas are strictly preserved.
-        </div>
-        <div id="reset-modal-status" style="margin-top: 12px; display: none;"></div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn btn-outline btn-sm" id="btn-cancel-reset" type="button">Cancel</button>
-        <button class="btn btn-danger btn-sm" id="btn-confirm-reset" type="button">🗑️ Yes, Reset Demo Data</button>
-      </div>
-    </div>
-  </div>
 
   <script src="/static/js/common.js"></script>
   <script src="/static/js/bank.js"></script>
