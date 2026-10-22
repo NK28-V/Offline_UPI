@@ -1,33 +1,18 @@
-# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
-
-# SQLite databases generated during runtime
 *.db
 *.db-journal
 *.sqlite
 *.sqlite3
-
-# Runtime payer and merchant state files and private keys
-payer_state_*.json
-*state*.json
+*.json
 *.pem
 *.key
 *.secret
-
-# Environment and credentials
 .env
 .env.*
-*.env
-credentials.json
-
-# Logs
 *.log
-
-# Virtual environments
 .venv/
 env/
 venv/
 .DS_Store
-
