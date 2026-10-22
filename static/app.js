@@ -13,13 +13,58 @@ function showBanner(msg, type = "success") {
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
+// One place that maps every status in the system to a badge colour.
+const BADGE = {
+  SETTLED: "badge-settled", CANCELLED: "badge-settled",
+  CREATED: "badge-pending", PENDING: "badge-pending", CANCEL_PENDING: "badge-pending", VOIDED: "badge-pending", FLAGGED: "badge-pending",
+  DUPLICATE: "badge-duplicate", REJECTED: "badge-rejected", CANCELLED_BY_PAYER: "badge-rejected",
+};
+const badge = (s) => `<span class="badge ${BADGE[s] || "badge-rejected"}">${String(s).replace(/_/g, " ")}</span>`;
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+// Clipboard API only works on https or 127.0.0.1. On a LAN IP (http://192.168.x.x) fall back to execCommand.
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return true; }
+  } catch (_) {}
+  const ta = document.createElement("textarea");
+  ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+  document.body.appendChild(ta); ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch (_) {}
+  ta.remove();
+  return ok;
+}
+
+// Accepts whatever the merchant pastes: extra spaces/text around it, smart quotes from chat apps, or a wrapper object.
+function parseTokenText(raw) {
+  let t = raw.trim().replace(/[\u201C\u201D]/g, '"').replace(/[\u2018\u2019]/g, "'");
+  const a = t.indexOf("{"), b = t.lastIndexOf("}");
+  if (a === -1 || b <= a) throw new Error("No JSON object found. Paste the full token starting with { and ending with }.");
+  let obj;
+  try { obj = JSON.parse(t.slice(a, b + 1)); }
+  catch (e) { throw new Error("Token JSON is incomplete or corrupted (" + e.message + "). Copy it again from the payer."); }
+  if (obj && obj.token_package) obj = obj.token_package;
+  if (!obj || !obj.payload || !obj.signature) throw new Error("This JSON is not a payment token (needs \"payload\" and \"signature\").");
+  return obj;
+}
+
+async function cancelToken(tid) {
+  const res = await api("/api/payer/cancel_token", { token_id: tid });
+  if (res.success) showBanner(res.message, res.level || "warning");
+  return res;
+}
+
+// api() already shows the error in the red banner, so don't also dump it to the console as "uncaught".
+window.addEventListener("unhandledrejection", (e) => e.preventDefault());
+
 async function api(url, data = null) {
   try {
     const opts = { method: data ? "POST" : "GET", headers: { "Content-Type": "application/json" } };
     if (data) opts.body = JSON.stringify(data);
     const res = await fetch(url, opts);
     const json = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+    if (!res.ok) throw new Error(json.error || json.message || `Request failed (HTTP ${res.status})`);
     return json;
   } catch (err) {
     showBanner(err.message, "danger");
@@ -46,27 +91,38 @@ if (role === "payer") {
       document.getElementById("disp-bank-url").textContent = data.bank_url;
       document.getElementById("disp-remaining").textContent = `₹${(data.remaining_paise / 100).toFixed(2)}`;
       document.getElementById("disp-spent").textContent = `₹${(data.spent_paise / 100).toFixed(2)}`;
+      document.getElementById("disp-paid").textContent = `₹${((data.paid_paise || 0) / 100).toFixed(2)}`;
       const pct = Math.min(100, Math.round((data.spent_paise / data.cap_paise) * 100));
       document.getElementById("allowance-bar").style.width = `${pct}%`;
 
+      if (activeToken && !data.tokens.some(t => t.token_id === activeToken.payload.tokenID && ["CREATED", "CANCEL_PENDING"].includes(t.status))) {
+        document.getElementById("token-card").style.display = "none"; activeToken = null;
+      }
       const tbody = document.getElementById("payer-tokens-tbody");
       if (!data.tokens || data.tokens.length === 0) {
         tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);">No offline payments yet.</td></tr>';
       } else {
         tbody.innerHTML = data.tokens.map(t => {
-          const badgeCls = t.status === "SETTLED" ? "badge-settled" : (t.status === "CREATED" ? "badge-pending" : "badge-rejected");
-          const act = t.status === "CREATED" ? `<button class="btn btn-secondary btn-cancel-row" data-tid="${t.token_id}" style="padding:4px 8px;font-size:12px;">Cancel</button>` : "—";
-          return `<tr><td><code>${t.token_id.slice(0, 8)}...</code></td><td>${t.payee_id}</td><td>₹${(t.amount_paise / 100).toFixed(2)}</td><td><span class="badge ${badgeCls}">${t.status}</span></td><td>${act}</td></tr>`;
+          const view = `<button class="btn btn-secondary btn-view-row" data-tid="${esc(t.token_id)}" style="padding:4px 8px;font-size:12px;">View</button>`;
+          const cancel = t.status === "CREATED" ? ` <button class="btn btn-secondary btn-cancel-row" data-tid="${esc(t.token_id)}" style="padding:4px 8px;font-size:12px;">Request cancel</button>` : "";
+          const act = view + cancel;
+          return `<tr><td><code>${esc(t.token_id.slice(0, 8))}...</code></td><td>${esc(t.payee_id)}</td><td>₹${(t.amount_paise / 100).toFixed(2)}</td><td>${badge(t.status)}</td><td>${act}</td></tr>`;
         }).join("");
+
+        document.querySelectorAll(".btn-view-row").forEach(btn => {
+          btn.addEventListener("click", async () => {
+            try {
+              const res = await api(`/api/payer/token/${encodeURIComponent(btn.dataset.tid)}`);
+              showToken(res.token_package, res.status);
+            } catch (_) {}
+          });
+        });
 
         document.querySelectorAll(".btn-cancel-row").forEach(btn => {
           btn.addEventListener("click", async () => {
-            const tid = btn.dataset.tid;
-            const res = await api("/api/payer/cancel_token", { token_id: tid });
-            if (res.success) {
-              showBanner(res.message, "warning");
-              loadPayer();
-            }
+            btn.disabled = true;
+            try { await cancelToken(btn.dataset.tid); } catch (_) {}
+            loadPayer();
           });
         });
       }
@@ -89,25 +145,38 @@ if (role === "payer") {
 
     const res = await api("/api/payer/create_token", { amount: amt, payee_id: payee });
     if (res.success) {
-      activeToken = res.token_package;
-      const card = document.getElementById("token-card");
-      card.style.display = "block";
-      document.getElementById("ready-amt").textContent = `₹${amt.toFixed(2)}`;
-      document.getElementById("ready-payee").textContent = payee;
-      document.getElementById("ready-tid").textContent = activeToken.payload.tokenID.slice(0, 8) + "...";
-
-      const qrBox = document.getElementById("qrcode");
-      qrBox.innerHTML = "";
-      qrInstance = new QRCode(qrBox, { text: JSON.stringify(activeToken), width: 180, height: 180 });
+      showToken(res.token_package, "CREATED");
       showBanner("Payment token generated and signed offline!", "success");
       loadPayer();
     }
   });
 
-  document.getElementById("btn-copy-token")?.addEventListener("click", () => {
+  // Shows (or re-shows) a token: QR + the exact JSON text, so it can be checked or copied again any time.
+  function showToken(pkg, status) {
+    activeToken = pkg;
+    const card = document.getElementById("token-card");
+    card.style.display = "block";
+    document.getElementById("ready-amt").textContent = `₹${(pkg.payload.amount_paise / 100).toFixed(2)}`;
+    document.getElementById("ready-payee").textContent = pkg.payload.payeeID;
+    document.getElementById("ready-tid").textContent = pkg.payload.tokenID.slice(0, 8) + "... (" + String(status).replace(/_/g, " ") + ")";
+    document.getElementById("token-json-view").value = JSON.stringify(pkg);
+    document.getElementById("btn-cancel-token").style.display = status === "CREATED" ? "" : "none";
+    const qrBox = document.getElementById("qrcode");
+    qrBox.innerHTML = "";
+    qrInstance = new QRCode(qrBox, { text: JSON.stringify(pkg), width: 220, height: 220, correctLevel: QRCode.CorrectLevel.L });
+    card.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
+  document.getElementById("token-json-view")?.addEventListener("click", (e) => e.target.select());
+  document.getElementById("btn-hide-token")?.addEventListener("click", () => {
+    document.getElementById("token-card").style.display = "none"; activeToken = null;
+  });
+
+  document.getElementById("btn-copy-token")?.addEventListener("click", async () => {
     if (!activeToken) return;
-    navigator.clipboard.writeText(JSON.stringify(activeToken, null, 2));
-    showBanner("Payment JSON copied to clipboard! Paste it into Merchant POS.", "success");
+    const ok = await copyText(JSON.stringify(activeToken));
+    if (ok) showBanner("Payment JSON copied! Paste it into Merchant POS.", "success");
+    else { document.getElementById("token-json-view").select(); showBanner("Browser blocked auto-copy. The JSON box is selected, so press Ctrl+C.", "warning"); }
   });
 
   document.getElementById("btn-dl-token")?.addEventListener("click", () => {
@@ -122,13 +191,14 @@ if (role === "payer") {
 
   document.getElementById("btn-cancel-token")?.addEventListener("click", async () => {
     if (!activeToken) return;
-    const res = await api("/api/payer/cancel_token", { token_id: activeToken.payload.tokenID });
-    if (res.success) {
-      document.getElementById("token-card").style.display = "none";
-      activeToken = null;
-      showBanner("Token cancelled; offline allowance restored.", "warning");
-      loadPayer();
-    }
+    try {
+      const res = await cancelToken(activeToken.payload.tokenID);
+      if (res.success) {
+        document.getElementById("token-card").style.display = "none";
+        activeToken = null;
+      }
+    } catch (_) {}
+    loadPayer();
   });
 
   document.getElementById("btn-refresh-payer")?.addEventListener("click", async () => {
@@ -169,8 +239,7 @@ if (role === "merchant") {
         tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);">No payments received yet.</td></tr>';
       } else {
         tbody.innerHTML = data.queue.map(q => {
-          const badgeCls = q.status === "SETTLED" ? "badge-settled" : (q.status === "PENDING" ? "badge-pending" : "badge-rejected");
-          return `<tr><td><code>${q.token_id.slice(0, 8)}...</code></td><td>${q.payer_id}</td><td>₹${(q.amount_paise / 100).toFixed(2)}</td><td><span class="badge ${badgeCls}">${q.status}</span></td><td><small>${q.reason || "—"}</small></td></tr>`;
+          return `<tr><td><code>${esc(q.token_id.slice(0, 8))}...</code></td><td>${esc(q.payer_id)}</td><td>₹${(q.amount_paise / 100).toFixed(2)}</td><td>${badge(q.status)}</td><td><small>${esc(q.reason || "—")}</small></td></tr>`;
         }).join("");
       }
     } catch (_) {}
@@ -202,7 +271,7 @@ if (role === "merchant") {
     const raw = document.getElementById("token-paste").value.trim();
     if (!raw) return showBanner("Please paste token JSON or select a file", "danger");
     let pkg;
-    try { pkg = JSON.parse(raw); } catch (e) { return showBanner("Invalid JSON string: " + e.message, "danger"); }
+    try { pkg = parseTokenText(raw); } catch (e) { return showBanner(e.message, "danger"); }
 
     const res = await api("/api/merchant/verify_token", { token_package: pkg });
     if (res.success) {
@@ -251,16 +320,15 @@ if (role === "bank") {
         lbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--muted);">No transactions in ledger yet.</td></tr>';
       } else {
         lbody.innerHTML = st.ledger.map(row => {
-          const badgeCls = row.status === "SETTLED" ? "badge-settled" : (row.status === "DUPLICATE" ? "badge-duplicate" : "badge-rejected");
-          return `<tr><td><code>${row.token_id.slice(0, 8)}...</code></td><td>${row.payer_id}</td><td>${row.payee_id}</td><td>₹${(row.amount_paise / 100).toFixed(2)}</td><td><span class="badge ${badgeCls}">${row.status}</span></td><td><small>${row.reason || "—"}</small></td></tr>`;
+          return `<tr><td><code>${esc(String(row.token_id).slice(0, 8))}...</code></td><td>${esc(row.payer_id)}</td><td>${esc(row.payee_id)}</td><td>₹${(row.amount_paise / 100).toFixed(2)}</td><td>${badge(row.status)}</td><td><small>${esc(row.reason || "—")}</small></td></tr>`;
         }).join("");
       }
 
       document.getElementById("bank-payer-count").textContent = (st.payers || []).length;
-      document.getElementById("bank-payers-tbody").innerHTML = (st.payers || []).map(p => `<tr><td>${p.payer_id}</td><td>${new Date(p.registered_at * 1000).toLocaleTimeString()}</td></tr>`).join("") || '<tr><td colspan="2" style="text-align:center;color:var(--muted);">No payers registered.</td></tr>';
+      document.getElementById("bank-payers-tbody").innerHTML = (st.payers || []).map(p => `<tr><td>${esc(p.payer_id)}</td><td>${new Date(p.registered_at * 1000).toLocaleTimeString()}</td></tr>`).join("") || '<tr><td colspan="2" style="text-align:center;color:var(--muted);">No payers registered.</td></tr>';
 
       document.getElementById("bank-merchant-count").textContent = (st.merchants || []).length;
-      document.getElementById("bank-merchants-tbody").innerHTML = (st.merchants || []).map(m => `<tr><td>${m.merchant_id}</td><td><small>${m.merchant_url}</small></td></tr>`).join("") || '<tr><td colspan="2" style="text-align:center;color:var(--muted);">No merchants registered.</td></tr>';
+      document.getElementById("bank-merchants-tbody").innerHTML = (st.merchants || []).map(m => `<tr><td>${esc(m.merchant_id)}</td><td><small>${esc(m.merchant_url)}</small></td></tr>`).join("") || '<tr><td colspan="2" style="text-align:center;color:var(--muted);">No merchants registered.</td></tr>';
     } catch (_) {}
   }
 
@@ -285,8 +353,8 @@ if (role === "bank") {
   document.getElementById("btn-copy-bank-key")?.addEventListener("click", async () => {
     const res = await api("/api/bank/public_key");
     if (res.public_key_pem) {
-      navigator.clipboard.writeText(res.public_key_pem);
-      showBanner("Bank public key copied to clipboard!", "success");
+      const ok = await copyText(res.public_key_pem);
+      showBanner(ok ? "Bank public key copied to clipboard!" : "Browser blocked copying. Use http://127.0.0.1 or copy manually.", ok ? "success" : "warning");
     }
   });
 

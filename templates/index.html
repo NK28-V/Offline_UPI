@@ -17,7 +17,7 @@
     .top-nav { background:var(--card); border-bottom:2px solid var(--border); padding:12px 24px; position:sticky; top:0; z-index:100; box-shadow:var(--shadow); }
     .nav-inner { max-width:980px; margin:0 auto; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; }
     .nav-brand { font-size:20px; font-weight:700; color:var(--text); text-decoration:none; display:flex; align-items:center; gap:8px; }
-    .badge { display:inline-block; font-size:12px; font-weight:700; padding:4px 10px; border-radius:20px; text-transform:uppercase; letter-spacing:0.5px; }
+    .badge { display:inline-block; white-space:nowrap; font-size:12px; font-weight:700; padding:4px 10px; border-radius:20px; text-transform:uppercase; letter-spacing:0.5px; }
     .badge-settled, .badge-success { background:var(--success-bg); color:var(--success); border:1px solid var(--success-border); }
     .badge-pending, .badge-warning { background:var(--warning-bg); color:var(--warning); border:1px solid var(--warning-border); }
     .badge-rejected, .badge-danger, .badge-duplicate { background:var(--danger-bg); color:var(--danger); border:1px solid var(--danger-border); }
@@ -88,10 +88,12 @@
 
       <div class="card" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:16px;">
         <div>
-          <div class="stat-label">Offline Allowance (₹500 Cap)</div>
+          <div class="stat-label">Offline Limit Available (not your balance)</div>
           <div style="font-size:32px; font-weight:800; color:var(--success);" id="disp-remaining">₹500.00</div>
-          <div style="font-size:13px; color:var(--muted);">Spent Offline: <strong id="disp-spent">₹0.00</strong> / ₹500.00</div>
+          <div style="font-size:13px; color:var(--muted);">Blocked (waiting for bank): <strong id="disp-spent">₹0.00</strong> / ₹500.00</div>
           <div class="progress-bar" style="width:240px;"><div id="allowance-bar" class="progress-fill" style="width:0%;"></div></div>
+          <div style="font-size:13px; color:var(--muted); margin-top:8px;">Total paid (debited from bank account): <strong id="disp-paid" style="color:var(--text, #111);">₹0.00</strong></div>
+          <div style="font-size:12px; color:var(--muted); max-width:420px; margin-top:4px;">The ₹500 is an offline <em>limit</em>, not your balance. It refills once the bank settles a payment and debits your account.</div>
         </div>
         <button id="btn-refresh-payer" class="btn btn-secondary">Refresh from Bank</button>
       </div>
@@ -108,10 +110,12 @@
         <p style="font-size:14px; color:var(--muted); margin-bottom:12px;">Present QR to Merchant or copy/download the signed token JSON.</p>
         <div class="qr-code-box"><div id="qrcode"></div></div>
         <div style="margin:12px 0; font-size:14px;"><strong>Amount:</strong> <span id="ready-amt"></span> | <strong>To:</strong> <span id="ready-payee"></span> | <strong>ID:</strong> <code id="ready-tid"></code></div>
+        <textarea id="token-json-view" class="form-textarea" rows="4" readonly style="width:100%; font-family:monospace; font-size:12px; margin-bottom:12px;" title="Click to select all"></textarea>
         <div style="display:flex; justify-content:center; gap:8px; flex-wrap:wrap;">
           <button id="btn-copy-token" class="btn btn-secondary">Copy JSON</button>
           <button id="btn-dl-token" class="btn btn-secondary">Download .json</button>
-          <button id="btn-cancel-token" class="btn btn-danger">Cancel Unsent Token</button>
+          <button id="btn-cancel-token" class="btn btn-danger">Request Cancel</button>
+          <button id="btn-hide-token" class="btn btn-secondary">Hide</button>
         </div>
       </div>
 

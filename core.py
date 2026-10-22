@@ -3,6 +3,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
+OFFLINE_CAP_PAISE = 50_000      # ₹500 offline spending cap
+MAX_TOKEN_AGE_S = 86_400        # tokens older than 24h are not accepted / flagged
+MAX_CLOCK_SKEW_S = 300          # tokens dated >5 min in the future are rejected
+
 # --- Crypto: RSA-2048, RSA-PSS SHA-256, Canonical JSON ---
 
 def generate_keypair() -> Tuple[str, str]:
@@ -27,10 +31,43 @@ def verify_sig(data: Any, sig_b64: str, pub_pem: str) -> bool:
     except Exception:
         return False
 
+def is_valid_public_key(pem: Any) -> bool:
+    try:
+        serialization.load_pem_public_key(pem.encode())
+        return True
+    except Exception:
+        return False
+
+def _is_int(v: Any) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+def _is_id(v: Any) -> bool:
+    return isinstance(v, str) and 0 < len(v.strip()) <= 100
+
+def validate_payload(payload: Any, now: Optional[int] = None) -> Optional[str]:
+    """Shared input check used by Merchant and Bank. Returns an error message, or None if OK."""
+    now = int(time.time()) if now is None else now
+    if not isinstance(payload, dict): return "Payload must be a JSON object."
+    for f in ("tokenID", "payerID", "payeeID"):
+        if not _is_id(payload.get(f)): return f"Field '{f}' missing or invalid."
+    amt, ts = payload.get("amount_paise"), payload.get("timestamp")
+    if not _is_int(amt): return "amount_paise must be a whole number of paise."
+    if amt <= 0: return "Token amount must be strictly positive."
+    if amt > OFFLINE_CAP_PAISE: return "Token amount exceeds the ₹500 offline cap."
+    if not _is_int(ts): return "timestamp must be an integer (unix seconds)."
+    if ts > now + MAX_CLOCK_SKEW_S: return "Token timestamp is in the future."
+    return None
+
 # --- Payer: Offline Wallet, Cap = 50,000 Paise (₹500) ---
+# Token states: CREATED -> SETTLED | FLAGGED          (merchant reached the bank first)
+#               CREATED -> CANCEL_PENDING -> CANCELLED (payer's cancel reached the bank first)
+#               CANCEL_PENDING -> SETTLED              (cancel lost the race; money already went to merchant)
+# CREATED and CANCEL_PENDING both still count as SPENT. Allowance is only freed by a bank-signed answer.
+
+SPENT_STATES = ("CREATED", "CANCEL_PENDING")
 
 class Payer:
-    OFFLINE_CAP_PAISE = 50_000
+    OFFLINE_CAP_PAISE = OFFLINE_CAP_PAISE
 
     def __init__(self, db_path: str = "payer.db"):
         self.db_path = db_path
@@ -40,64 +77,95 @@ class Payer:
             self.conn.execute("CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             self.conn.execute("CREATE TABLE IF NOT EXISTS tokens (token_id TEXT PRIMARY KEY, payee_id TEXT NOT NULL, amount_paise INTEGER NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL, token_json TEXT NOT NULL)")
 
+    def _cfg(self, key: str) -> Optional[str]:
+        cur = self.conn.cursor()
+        cur.execute("SELECT value FROM config WHERE key = ?", (key,))
+        row = cur.fetchone()
+        return row["value"] if row else None
+
     def get_info(self) -> Dict[str, Any]:
         cur = self.conn.cursor()
         cur.execute("SELECT key, value FROM config")
         cfg = {r["key"]: r["value"] for r in cur.fetchall()}
         if "payer_id" not in cfg:
             return {"registered": False, "cap_paise": self.OFFLINE_CAP_PAISE}
-        cur.execute("SELECT SUM(amount_paise) FROM tokens WHERE status = 'CREATED'")
+        cur.execute(f"SELECT SUM(amount_paise) FROM tokens WHERE status IN {SPENT_STATES}")
         spent = cur.fetchone()[0] or 0
-        cur.execute("SELECT * FROM tokens ORDER BY created_at DESC")
+        cur.execute("SELECT SUM(amount_paise) FROM tokens WHERE status IN ('SETTLED', 'FLAGGED')")
+        paid = cur.fetchone()[0] or 0
+        cur.execute("SELECT token_id, payee_id, amount_paise, status, created_at FROM tokens ORDER BY created_at DESC")
         tokens = [dict(r) for r in cur.fetchall()]
-        return {"registered": True, "payer_id": cfg["payer_id"], "bank_url": cfg.get("bank_url"), "cap_paise": self.OFFLINE_CAP_PAISE, "spent_paise": spent, "remaining_paise": max(0, self.OFFLINE_CAP_PAISE - spent), "tokens": tokens}
+        # spent_paise = blocked offline (bank hasn't decided yet); paid_paise = already debited from the bank account.
+        return {"registered": True, "payer_id": cfg["payer_id"], "bank_url": cfg.get("bank_url"), "cap_paise": self.OFFLINE_CAP_PAISE, "spent_paise": spent, "paid_paise": paid, "remaining_paise": max(0, self.OFFLINE_CAP_PAISE - spent), "tokens": tokens}
 
-    def register(self, payer_id: str, bank_url: str, bank_pub_key: str) -> str:
-        priv_pem, pub_pem = generate_keypair()
+    def register(self, payer_id: str, bank_url: str, bank_pub_key: str, priv_pem: str, pub_pem: str):
+        """Called only AFTER the bank accepted the public key, so a rejected ID never leaves a half-registered wallet."""
         with self.conn:
             for k, v in [('payer_id', payer_id.strip()), ('bank_url', bank_url.rstrip("/")), ('private_key', priv_pem), ('public_key', pub_pem), ('bank_public_key', bank_pub_key.strip())]:
                 self.conn.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)", (k, v))
-        return pub_pem
 
     def create_token(self, payee_id: str, amount_paise: int) -> Dict[str, Any]:
         info = self.get_info()
         if not info["registered"]: raise ValueError("Payer wallet not initialized.")
-        if amount_paise <= 0: raise ValueError("Amount must be greater than zero.")
+        if not _is_id(payee_id): raise ValueError("Merchant UPI ID is required.")
+        if not _is_int(amount_paise) or amount_paise <= 0: raise ValueError("Amount must be greater than zero.")
         if info["spent_paise"] + amount_paise > self.OFFLINE_CAP_PAISE:
             raise ValueError(f"Offline cap exceeded. Limit is ₹500. Remaining: ₹{info['remaining_paise']/100:.2f}.")
 
-        cur = self.conn.cursor()
-        cur.execute("SELECT value FROM config WHERE key = 'private_key'")
-        priv_pem = cur.fetchone()["value"]
-
         payload = {"tokenID": str(uuid.uuid4()), "payerID": info["payer_id"], "payeeID": payee_id.strip(), "amount_paise": int(amount_paise), "timestamp": int(time.time())}
-        pkg = {"payload": payload, "signature": sign_data(payload, priv_pem)}
+        pkg = {"payload": payload, "signature": sign_data(payload, self._cfg("private_key"))}
         with self.conn:
             self.conn.execute("INSERT INTO tokens VALUES (?, ?, ?, 'CREATED', ?, ?)", (payload["tokenID"], payload["payeeID"], payload["amount_paise"], payload["timestamp"], json.dumps(pkg)))
         return pkg
 
-    def cancel_token(self, token_id: str) -> bool:
-        with self.conn:
-            cur = self.conn.cursor()
-            cur.execute("SELECT status FROM tokens WHERE token_id = ?", (token_id,))
-            row = cur.fetchone()
-            if not row or row["status"] != "CREATED": return False
-            cur.execute("UPDATE tokens SET status = 'CANCELLED' WHERE token_id = ?", (token_id,))
-            return True
-
-    def reconcile(self, statement: Dict[str, Any]) -> int:
-        payload, sig = statement.get("payload", {}), statement.get("signature", "")
+    def get_token(self, token_id: str) -> Optional[Dict[str, Any]]:
         cur = self.conn.cursor()
-        cur.execute("SELECT value FROM config WHERE key = 'bank_public_key'")
+        cur.execute("SELECT token_json, status FROM tokens WHERE token_id = ?", (token_id,))
         row = cur.fetchone()
-        if not row or not verify_sig(payload, sig, row["value"]):
-            raise ValueError("Invalid bank signature on settlement reconciliation.")
-        updated = 0
+        return {"token_package": json.loads(row["token_json"]), "status": row["status"]} if row else None
+
+    def _signed_cancel(self, token_id: str) -> Dict[str, Any]:
+        cur = self.conn.cursor()
+        cur.execute("SELECT token_json FROM tokens WHERE token_id = ?", (token_id,))
+        p = json.loads(cur.fetchone()["token_json"])["payload"]
+        payload = {"action": "CANCEL", "tokenID": p["tokenID"], "payerID": p["payerID"], "payeeID": p["payeeID"], "amount_paise": p["amount_paise"], "timestamp": p["timestamp"]}
+        return {"payload": payload, "signature": sign_data(payload, self._cfg("private_key"))}
+
+    def request_cancel(self, token_id: str) -> Optional[Dict[str, Any]]:
+        """Marks a CREATED token as CANCEL_PENDING (still counts as spent) and returns the signed cancel request for the bank."""
         with self.conn:
-            for tid in payload.get("settled_token_ids", []):
-                res = self.conn.execute("UPDATE tokens SET status = 'SETTLED' WHERE token_id = ? AND status = 'CREATED'", (tid,))
-                updated += res.rowcount
-        return updated
+            res = self.conn.execute("UPDATE tokens SET status = 'CANCEL_PENDING' WHERE token_id = ? AND status IN ('CREATED', 'CANCEL_PENDING')", (token_id,))
+        return self._signed_cancel(token_id) if res.rowcount else None
+
+    def pending_cancels(self) -> List[Dict[str, Any]]:
+        cur = self.conn.cursor()
+        cur.execute("SELECT token_id FROM tokens WHERE status = 'CANCEL_PENDING'")
+        return [self._signed_cancel(r["token_id"]) for r in cur.fetchall()]
+
+    def apply_cancel_result(self, token_id: str, bank_status: str) -> str:
+        """bank_status is the bank's final word on the token: VOIDED -> CANCELLED (allowance back), SETTLED/FLAGGED -> stays spent."""
+        new = {"VOIDED": "CANCELLED", "SETTLED": "SETTLED", "FLAGGED": "FLAGGED"}.get(bank_status)
+        if new:
+            with self.conn:
+                self.conn.execute(f"UPDATE tokens SET status = ? WHERE token_id = ? AND status IN {SPENT_STATES}", (new, token_id))
+        return new or "CANCEL_PENDING"
+
+    def reconcile(self, statement: Dict[str, Any]) -> Dict[str, int]:
+        payload, sig = statement.get("payload", {}), statement.get("signature", "")
+        bank_key = self._cfg("bank_public_key")
+        if not bank_key or not verify_sig(payload, sig, bank_key):
+            raise ValueError("Invalid bank signature on settlement statement.")
+        if payload.get("payer_id") != self._cfg("payer_id"):
+            raise ValueError("Statement belongs to a different payer.")
+        counts = {}
+        with self.conn:
+            # WHERE status IN (CREATED, CANCEL_PENDING) makes this idempotent: refreshing 3 times frees allowance once.
+            for key, new in (("settled_token_ids", "SETTLED"), ("flagged_token_ids", "FLAGGED"), ("voided_token_ids", "CANCELLED")):
+                n = 0
+                for tid in payload.get(key, []):
+                    n += self.conn.execute(f"UPDATE tokens SET status = ? WHERE token_id = ? AND status IN {SPENT_STATES}", (new, tid)).rowcount
+                counts[new.lower()] = n
+        return counts
 
 # --- Merchant POS: Offline Queue & Local Public Key Cache ---
 
@@ -117,8 +185,14 @@ class Merchant:
         cfg = {r["key"]: r["value"] for r in cur.fetchall()}
         cur.execute("SELECT COUNT(*) FROM trusted_payers")
         p_count = cur.fetchone()[0]
-        cur.execute("SELECT * FROM queue ORDER BY received_at DESC")
+        cur.execute("SELECT token_id, payer_id, payee_id, amount_paise, status, reason, received_at FROM queue ORDER BY received_at DESC")
         return {"registered": "merchant_id" in cfg, "merchant_id": cfg.get("merchant_id"), "bank_url": cfg.get("bank_url"), "merchant_url": cfg.get("merchant_url"), "trusted_payers_count": p_count, "queue": [dict(r) for r in cur.fetchall()]}
+
+    def get_api_key(self) -> Optional[str]:
+        cur = self.conn.cursor()
+        cur.execute("SELECT value FROM config WHERE key = 'api_key'")
+        row = cur.fetchone()
+        return row["value"] if row else None
 
     def register(self, merchant_id: str, bank_url: str, merchant_url: str, api_key: str):
         with self.conn:
@@ -128,22 +202,25 @@ class Merchant:
     def update_trusted_payers(self, payers: List[Dict[str, str]]):
         with self.conn:
             for p in payers:
-                self.conn.execute("INSERT OR REPLACE INTO trusted_payers VALUES (?, ?)", (p["payer_id"], p["public_key_pem"]))
+                if isinstance(p, dict) and _is_id(p.get("payer_id")) and isinstance(p.get("public_key_pem"), str):
+                    self.conn.execute("INSERT OR REPLACE INTO trusted_payers VALUES (?, ?)", (p["payer_id"], p["public_key_pem"]))
 
-    def verify_and_queue(self, token_pkg: Dict[str, Any]) -> Tuple[bool, str]:
+    def verify_and_queue(self, token_pkg: Any) -> Tuple[bool, str]:
         cur = self.conn.cursor()
         cur.execute("SELECT value FROM config WHERE key = 'merchant_id'")
         m_row = cur.fetchone()
         if not m_row: return False, "Merchant shop is not initialized."
         merchant_id = m_row["value"]
 
-        payload = token_pkg.get("payload") if isinstance(token_pkg, dict) else None
-        sig = token_pkg.get("signature") if isinstance(token_pkg, dict) else None
-        if not payload or not sig: return False, "Invalid token package format."
+        if not isinstance(token_pkg, dict): return False, "Invalid token package format."
+        payload, sig = token_pkg.get("payload"), token_pkg.get("signature")
+        if not isinstance(sig, str) or not sig: return False, "Invalid token package format (missing signature)."
+        now = int(time.time())
+        err = validate_payload(payload, now)
+        if err: return False, err
+        if now - payload["timestamp"] > MAX_TOKEN_AGE_S: return False, "Token is older than 24 hours; ask the payer for a fresh one."
 
-        tid, payer_id, payee_id, amt = payload.get("tokenID"), payload.get("payerID"), payload.get("payeeID"), payload.get("amount_paise")
-        if not tid or not payer_id or amt is None: return False, "Missing required token payload fields."
-        if amt <= 0: return False, "Token amount must be strictly positive."
+        tid, payer_id, payee_id, amt = payload["tokenID"], payload["payerID"], payload["payeeID"], payload["amount_paise"]
         if payee_id != merchant_id: return False, f"Payee mismatch: Token intended for '{payee_id}', not '{merchant_id}'."
 
         cur.execute("SELECT token_id FROM queue WHERE token_id = ?", (tid,))
@@ -155,8 +232,8 @@ class Merchant:
         if not verify_sig(payload, sig, p_row["public_key_pem"]): return False, "Cryptographic signature verification failed."
 
         with self.conn:
-            self.conn.execute("INSERT INTO queue VALUES (?, ?, ?, ?, 'PENDING', 'Awaiting bank sync', ?, ?)", (tid, payer_id, payee_id, amt, int(time.time()), json.dumps(token_pkg)))
-        return True, "Payment verified and queued offline."
+            self.conn.execute("INSERT INTO queue VALUES (?, ?, ?, ?, 'PENDING', 'Awaiting bank sync', ?, ?)", (tid, payer_id, payee_id, amt, now, json.dumps(token_pkg)))
+        return True, "Payment verified and queued offline. Final only after bank sync."
 
     def get_pending_batch(self) -> List[Dict[str, Any]]:
         cur = self.conn.cursor()
@@ -166,9 +243,12 @@ class Merchant:
     def apply_sync_results(self, results: List[Dict[str, Any]]):
         with self.conn:
             for item in results:
-                self.conn.execute("UPDATE queue SET status = ?, reason = ? WHERE token_id = ?", (item["status"], item.get("reason", ""), item["token_id"]))
+                if isinstance(item, dict) and item.get("token_id") and item.get("status"):
+                    self.conn.execute("UPDATE queue SET status = ?, reason = ? WHERE token_id = ? AND status = 'PENDING'", (item["status"], item.get("reason", ""), item["token_id"]))
 
 # --- Bank: Authoritative Ledger, Atomic Savepoints, Signatures ---
+# The ledger's token_id PRIMARY KEY is the single source of truth: whoever reaches the bank first
+# (merchant settlement OR payer cancel) claims the token; the second one is refused atomically.
 
 class Bank:
     def __init__(self, db_path: str = "bank.db"):
@@ -180,6 +260,8 @@ class Bank:
             self.conn.execute("CREATE TABLE IF NOT EXISTS payers (payer_id TEXT PRIMARY KEY, public_key_pem TEXT NOT NULL, registered_at INTEGER NOT NULL)")
             self.conn.execute("CREATE TABLE IF NOT EXISTS merchants (merchant_id TEXT PRIMARY KEY, api_key TEXT NOT NULL, merchant_url TEXT NOT NULL, registered_at INTEGER NOT NULL)")
             self.conn.execute("CREATE TABLE IF NOT EXISTS ledger (token_id TEXT PRIMARY KEY, payer_id TEXT NOT NULL, payee_id TEXT NOT NULL, amount_paise INTEGER NOT NULL, status TEXT NOT NULL, reason TEXT, token_timestamp INTEGER NOT NULL, settled_at INTEGER NOT NULL)")
+            # Refused attempts (DUPLICATE / REJECTED / CANCELLED_BY_PAYER) are logged separately so the ledger PK stays clean.
+            self.conn.execute("CREATE TABLE IF NOT EXISTS attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, token_id TEXT, payer_id TEXT, payee_id TEXT, amount_paise INTEGER, status TEXT NOT NULL, reason TEXT, at INTEGER NOT NULL)")
         cur = self.conn.cursor()
         cur.execute("SELECT key_val FROM keys WHERE key_name = 'private_key'")
         if not cur.fetchone():
@@ -187,20 +269,35 @@ class Bank:
             with self.conn:
                 self.conn.execute("INSERT INTO keys VALUES ('private_key', ?), ('public_key', ?)", (priv_pem, pub_pem))
 
-    def get_public_key(self) -> str:
+    def _key(self, name: str) -> str:
         cur = self.conn.cursor()
-        cur.execute("SELECT key_val FROM keys WHERE key_name = 'public_key'")
+        cur.execute("SELECT key_val FROM keys WHERE key_name = ?", (name,))
         return cur.fetchone()["key_val"]
 
-    def register_payer(self, payer_id: str, public_key_pem: str):
-        with self.conn:
-            self.conn.execute("INSERT OR REPLACE INTO payers VALUES (?, ?, ?)", (payer_id.strip(), public_key_pem.strip(), int(time.time())))
+    def get_public_key(self) -> str:
+        return self._key("public_key")
 
-    def register_merchant(self, merchant_id: str, merchant_url: str, api_key: str):
-        with self.conn:
-            self.conn.execute("INSERT OR REPLACE INTO merchants VALUES (?, ?, ?, ?)", (merchant_id.strip(), api_key.strip(), merchant_url.rstrip("/"), int(time.time())))
+    def register_payer(self, payer_id: Any, public_key_pem: Any) -> Tuple[bool, str]:
+        if not _is_id(payer_id): return False, "Payer ID required."
+        if not is_valid_public_key(public_key_pem): return False, "Invalid public key."
+        try:
+            with self.conn:
+                self.conn.execute("INSERT INTO payers VALUES (?, ?, ?)", (payer_id.strip(), public_key_pem.strip(), int(time.time())))
+            return True, "Payer registered."
+        except sqlite3.IntegrityError:
+            return False, f"Payer ID '{payer_id.strip()}' is already registered with the bank."
 
-    def verify_merchant(self, merchant_id: str, api_key: str) -> bool:
+    def register_merchant(self, merchant_id: Any, merchant_url: Any, api_key: str) -> Tuple[bool, str]:
+        if not _is_id(merchant_id): return False, "Merchant ID required."
+        try:
+            with self.conn:
+                self.conn.execute("INSERT INTO merchants VALUES (?, ?, ?, ?)", (merchant_id.strip(), api_key, str(merchant_url or "").rstrip("/"), int(time.time())))
+            return True, "Merchant registered."
+        except sqlite3.IntegrityError:
+            return False, f"Merchant ID '{merchant_id.strip()}' is already registered with the bank."
+
+    def verify_merchant(self, merchant_id: Any, api_key: Any) -> bool:
+        if not isinstance(merchant_id, str) or not isinstance(api_key, str): return False
         cur = self.conn.cursor()
         cur.execute("SELECT api_key FROM merchants WHERE merchant_id = ?", (merchant_id.strip(),))
         row = cur.fetchone()
@@ -211,53 +308,113 @@ class Bank:
         cur.execute("SELECT payer_id, public_key_pem FROM payers ORDER BY registered_at ASC")
         return [dict(r) for r in cur.fetchall()]
 
-    def settle_batch(self, merchant_id: str, batch: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        results, now, cur = [], int(time.time()), self.conn.cursor()
+    def _log_attempt(self, payload: Any, status: str, reason: str, tid: Optional[str] = None):
+        p = payload if isinstance(payload, dict) else {}
+        amt = p.get("amount_paise") if _is_int(p.get("amount_paise")) else None
+        with self.conn:
+            self.conn.execute("INSERT INTO attempts (token_id, payer_id, payee_id, amount_paise, status, reason, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                              (str(tid or p.get("tokenID") or "unknown"), str(p.get("payerID") or "—"), str(p.get("payeeID") or "—"), amt, status, reason, int(time.time())))
+
+    def _payer_sig_ok(self, payload: Dict[str, Any], sig: Any) -> bool:
+        cur = self.conn.cursor()
+        cur.execute("SELECT public_key_pem FROM payers WHERE payer_id = ?", (payload["payerID"],))
+        row = cur.fetchone()
+        return bool(row and isinstance(sig, str) and verify_sig(payload, sig, row["public_key_pem"]))
+
+    def _claim(self, sp: str, row: tuple) -> Optional[str]:
+        """Atomically INSERT the token into the ledger. Returns None on success, or the status that already owns the token."""
+        cur = self.conn.cursor()
+        cur.execute(f"SAVEPOINT {sp}")
+        try:
+            cur.execute("INSERT INTO ledger VALUES (?, ?, ?, ?, ?, ?, ?, ?)", row)
+            cur.execute(f"RELEASE SAVEPOINT {sp}")
+            self.conn.commit()
+            return None
+        except sqlite3.IntegrityError:
+            cur.execute(f"ROLLBACK TO SAVEPOINT {sp}")
+            cur.execute(f"RELEASE SAVEPOINT {sp}")
+            self.conn.commit()
+            cur.execute("SELECT status FROM ledger WHERE token_id = ?", (row[0],))
+            return cur.fetchone()["status"]
+
+    def settle_batch(self, merchant_id: str, batch: Any) -> List[Dict[str, Any]]:
+        results, now = [], int(time.time())
+        if not isinstance(batch, list): return results
         for idx, pkg in enumerate(batch):
-            payload, sig = pkg.get("payload", {}), pkg.get("signature", "")
-            tid, payer_id, payee_id = payload.get("tokenID"), payload.get("payerID"), payload.get("payeeID")
-            amt, t_time = payload.get("amount_paise", 0), payload.get("timestamp", now)
+            payload = pkg.get("payload") if isinstance(pkg, dict) else None
+            sig = pkg.get("signature") if isinstance(pkg, dict) else None
+            tid = payload.get("tokenID") if isinstance(payload, dict) and isinstance(payload.get("tokenID"), str) else f"pkg_{idx}"
 
-            if not tid or not payer_id or amt <= 0 or payee_id != merchant_id:
-                results.append({"token_id": tid or f"pkg_{idx}", "status": "REJECTED", "reason": "Malformed payload or payee mismatch"})
+            err = validate_payload(payload, now)
+            if not err and payload["payeeID"] != merchant_id: err = "Payee mismatch"
+            if err:
+                self._log_attempt(payload, "REJECTED", err, tid)
+                results.append({"token_id": tid, "status": "REJECTED", "reason": err})
                 continue
-
-            cur.execute("SELECT public_key_pem FROM payers WHERE payer_id = ?", (payer_id,))
-            p_row = cur.fetchone()
-            if not p_row or not verify_sig(payload, sig, p_row["public_key_pem"]):
+            if not self._payer_sig_ok(payload, sig):
+                self._log_attempt(payload, "REJECTED", "Unknown payer or invalid signature", tid)
                 results.append({"token_id": tid, "status": "REJECTED", "reason": "Unknown payer or invalid signature"})
                 continue
 
-            status, reason = ("FLAGGED", "Token older than 24 hours") if (now - t_time > 86400) else ("SETTLED", "Settlement completed")
-            sp = f"sp_{idx}"
-            cur.execute(f"SAVEPOINT {sp}")
-            try:
-                cur.execute("INSERT INTO ledger VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (tid, payer_id, payee_id, amt, status, reason, t_time, now))
-                cur.execute(f"RELEASE SAVEPOINT {sp}")
-                self.conn.commit()
+            status, reason = ("FLAGGED", "Token older than 24 hours") if (now - payload["timestamp"] > MAX_TOKEN_AGE_S) else ("SETTLED", "Settlement completed")
+            existing = self._claim(f"sp_{idx}", (tid, payload["payerID"], payload["payeeID"], payload["amount_paise"], status, reason, payload["timestamp"], now))
+            if existing is None:
                 results.append({"token_id": tid, "status": status, "reason": reason})
-            except sqlite3.IntegrityError:
-                cur.execute(f"ROLLBACK TO SAVEPOINT {sp}")
-                cur.execute(f"RELEASE SAVEPOINT {sp}")
-                self.conn.commit()
-                results.append({"token_id": tid, "status": "DUPLICATE", "reason": "Double-spend attempt: Token already settled"})
+            elif existing == "VOIDED":
+                r = "Payer cancelled this token before the merchant synced. Ask the customer to pay again."
+                self._log_attempt(payload, "CANCELLED_BY_PAYER", r, tid)
+                results.append({"token_id": tid, "status": "CANCELLED_BY_PAYER", "reason": r})
+            else:
+                r = f"Double-spend attempt: Token already {existing}"
+                self._log_attempt(payload, "DUPLICATE", r, tid)
+                results.append({"token_id": tid, "status": "DUPLICATE", "reason": r})
         return results
+
+    def cancel_token(self, cancel_pkg: Any) -> Tuple[bool, str, str]:
+        """Payer-signed cancel. Returns (voided?, final_status, message). First to reach the bank wins."""
+        payload = cancel_pkg.get("payload") if isinstance(cancel_pkg, dict) else None
+        sig = cancel_pkg.get("signature") if isinstance(cancel_pkg, dict) else None
+        err = validate_payload(payload)
+        if err or payload.get("action") != "CANCEL": return False, "INVALID", err or "Not a cancel request."
+        if not self._payer_sig_ok(payload, sig): return False, "INVALID", "Unknown payer or invalid signature on cancel request."
+        tid = payload["tokenID"]
+        existing = self._claim("sp_cancel", (tid, payload["payerID"], payload["payeeID"], payload["amount_paise"], "VOIDED", "Cancelled by payer before merchant sync", payload["timestamp"], int(time.time())))
+        if existing is None: return True, "VOIDED", "Cancellation confirmed by bank. Allowance restored."
+        if existing == "VOIDED": return True, "VOIDED", "Token was already cancelled."
+        return False, existing, f"Cannot cancel: merchant already synced this payment (status {existing}). It stays spent."
+
+    def simulate_duplicate(self) -> Dict[str, Any]:
+        cur = self.conn.cursor()
+        cur.execute("SELECT * FROM ledger WHERE status = 'SETTLED' ORDER BY settled_at DESC LIMIT 1")
+        row = cur.fetchone()
+        if not row: return {"success": False, "message": "No settled transactions in ledger yet. Please settle a payment first."}
+        existing = self._claim("sim_dup", (row["token_id"], row["payer_id"], row["payee_id"], row["amount_paise"], "SETTLED", "Duplicate simulation", row["token_timestamp"], int(time.time())))
+        if existing is None: return {"success": True, "message": "Duplicate unexpectedly accepted."}
+        self._log_attempt({"tokenID": row["token_id"], "payerID": row["payer_id"], "payeeID": row["payee_id"], "amount_paise": row["amount_paise"]}, "DUPLICATE", "Simulated replay of a settled token")
+        return {"success": True, "status": "DUPLICATE", "token_id": row["token_id"], "message": f"Double-spend detected! Token '{row['token_id']}' rejected atomically by SQLite PRIMARY KEY."}
 
     def get_payer_settlement_statement(self, payer_id: str) -> Dict[str, Any]:
         cur = self.conn.cursor()
-        cur.execute("SELECT token_id FROM ledger WHERE payer_id = ? AND status = 'SETTLED'", (payer_id,))
-        payload = {"payer_id": payer_id, "settled_token_ids": [r["token_id"] for r in cur.fetchall()], "timestamp": int(time.time())}
-        cur.execute("SELECT key_val FROM keys WHERE key_name = 'private_key'")
-        return {"payload": payload, "signature": sign_data(payload, cur.fetchone()["key_val"])}
+        ids = {}
+        for status in ("SETTLED", "FLAGGED", "VOIDED"):
+            cur.execute("SELECT token_id FROM ledger WHERE payer_id = ? AND status = ?", (payer_id, status))
+            ids[status] = [r["token_id"] for r in cur.fetchall()]
+        payload = {"payer_id": payer_id, "settled_token_ids": ids["SETTLED"], "flagged_token_ids": ids["FLAGGED"], "voided_token_ids": ids["VOIDED"], "timestamp": int(time.time())}
+        return {"payload": payload, "signature": sign_data(payload, self._key("private_key"))}
 
     def get_stats(self) -> Dict[str, Any]:
         cur = self.conn.cursor()
-        cur.execute("SELECT COUNT(*), SUM(CASE WHEN status='SETTLED' THEN amount_paise ELSE 0 END), SUM(CASE WHEN status='SETTLED' THEN 1 ELSE 0 END), SUM(CASE WHEN status='DUPLICATE' THEN 1 ELSE 0 END), SUM(CASE WHEN status='REJECTED' THEN 1 ELSE 0 END) FROM ledger")
-        tot, amt, set_c, dup_c, rej_c = cur.fetchone()
-        cur.execute("SELECT * FROM ledger ORDER BY settled_at DESC")
-        ledger = [dict(r) for r in cur.fetchall()]
+        cur.execute("SELECT COUNT(*), SUM(CASE WHEN status='SETTLED' THEN amount_paise ELSE 0 END), SUM(CASE WHEN status='SETTLED' THEN 1 ELSE 0 END) FROM ledger")
+        tot, amt, set_c = cur.fetchone()
+        cur.execute("SELECT SUM(CASE WHEN status='DUPLICATE' THEN 1 ELSE 0 END), SUM(CASE WHEN status='REJECTED' THEN 1 ELSE 0 END), COUNT(*) FROM attempts")
+        dup_c, rej_c, att_c = cur.fetchone()
+        cur.execute("SELECT token_id, payer_id, payee_id, amount_paise, status, reason, settled_at FROM ledger")
+        rows = [dict(r) for r in cur.fetchall()]
+        cur.execute("SELECT token_id, payer_id, payee_id, COALESCE(amount_paise, 0) AS amount_paise, status, reason, at AS settled_at FROM attempts")
+        rows += [dict(r) for r in cur.fetchall()]
+        rows.sort(key=lambda r: r["settled_at"], reverse=True)
         cur.execute("SELECT payer_id, registered_at FROM payers ORDER BY registered_at DESC")
         payers = [dict(r) for r in cur.fetchall()]
         cur.execute("SELECT merchant_id, merchant_url, registered_at FROM merchants ORDER BY registered_at DESC")
         merchants = [dict(r) for r in cur.fetchall()]
-        return {"total_received": tot or 0, "settled_count": set_c or 0, "settled_amount_paise": amt or 0, "duplicate_count": dup_c or 0, "rejected_count": rej_c or 0, "ledger": ledger, "payers": payers, "merchants": merchants}
+        return {"total_received": (tot or 0) + (att_c or 0), "settled_count": set_c or 0, "settled_amount_paise": amt or 0, "duplicate_count": dup_c or 0, "rejected_count": rej_c or 0, "ledger": rows, "payers": payers, "merchants": merchants}
