@@ -1,7 +1,6 @@
 // Unified front-end logic for Offline UPI (Payer, Merchant, Bank)
 const role = document.body.dataset.role;
 let activeToken = null;
-let qrInstance = null;
 
 function showBanner(msg, type = "success") {
   const b = document.getElementById("alert-banner");
@@ -15,11 +14,12 @@ function showBanner(msg, type = "success") {
 
 // One place that maps every status in the system to a badge colour.
 const BADGE = {
-  SETTLED: "badge-settled", CANCELLED: "badge-settled",
+  SETTLED: "badge-settled", CANCELLED: "badge-settled", REFUNDED: "badge-settled",
   CREATED: "badge-pending", PENDING: "badge-pending", CANCEL_PENDING: "badge-pending", VOIDED: "badge-pending", FLAGGED: "badge-pending",
-  DUPLICATE: "badge-duplicate", REJECTED: "badge-rejected", CANCELLED_BY_PAYER: "badge-rejected",
+  DUPLICATE: "badge-duplicate", REJECTED: "badge-rejected", CANCELLED_BY_PAYER: "badge-rejected", EXPIRED: "badge-rejected",
 };
 const badge = (s) => `<span class="badge ${BADGE[s] || "badge-rejected"}">${String(s).replace(/_/g, " ")}</span>`;
+const when = (ts) => new Date(ts * 1000).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 // Clipboard API only works on https or 127.0.0.1. On a LAN IP (http://192.168.x.x) fall back to execCommand.
@@ -104,7 +104,11 @@ if (role === "payer") {
       } else {
         tbody.innerHTML = data.tokens.map(t => {
           const view = `<button class="btn btn-secondary btn-view-row" data-tid="${esc(t.token_id)}" style="padding:4px 8px;font-size:12px;">View</button>`;
-          const cancel = t.status === "CREATED" ? ` <button class="btn btn-secondary btn-cancel-row" data-tid="${esc(t.token_id)}" style="padding:4px 8px;font-size:12px;">Request cancel</button>` : "";
+          // A handed-over token is final. Only an UNUSED token can be reclaimed, and only after the merchant window.
+          let cancel = "";
+          if (t.status === "CREATED") cancel = t.can_reclaim
+            ? ` <button class="btn btn-secondary btn-cancel-row" data-tid="${esc(t.token_id)}" style="padding:4px 8px;font-size:12px;">Reclaim unused</button>`
+            : ` <small style="color:var(--muted);">reclaim after ${esc(when(t.unlock_at))}</small>`;
           const act = view + cancel;
           return `<tr><td><code>${esc(t.token_id.slice(0, 8))}...</code></td><td>${esc(t.payee_id)}</td><td>₹${(t.amount_paise / 100).toFixed(2)}</td><td>${badge(t.status)}</td><td>${act}</td></tr>`;
         }).join("");
@@ -151,7 +155,7 @@ if (role === "payer") {
     }
   });
 
-  // Shows (or re-shows) a token: QR + the exact JSON text, so it can be checked or copied again any time.
+  // Shows (or re-shows) a token: the exact JSON text, so it can be checked or copied again any time.
   function showToken(pkg, status) {
     activeToken = pkg;
     const card = document.getElementById("token-card");
@@ -160,10 +164,6 @@ if (role === "payer") {
     document.getElementById("ready-payee").textContent = pkg.payload.payeeID;
     document.getElementById("ready-tid").textContent = pkg.payload.tokenID.slice(0, 8) + "... (" + String(status).replace(/_/g, " ") + ")";
     document.getElementById("token-json-view").value = JSON.stringify(pkg);
-    document.getElementById("btn-cancel-token").style.display = status === "CREATED" ? "" : "none";
-    const qrBox = document.getElementById("qrcode");
-    qrBox.innerHTML = "";
-    qrInstance = new QRCode(qrBox, { text: JSON.stringify(pkg), width: 220, height: 220, correctLevel: QRCode.CorrectLevel.L });
     card.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
@@ -187,18 +187,6 @@ if (role === "payer") {
     a.download = `offline_token_${activeToken.payload.tokenID.slice(0, 8)}.json`;
     a.click();
     showBanner("Downloaded payment JSON file.", "success");
-  });
-
-  document.getElementById("btn-cancel-token")?.addEventListener("click", async () => {
-    if (!activeToken) return;
-    try {
-      const res = await cancelToken(activeToken.payload.tokenID);
-      if (res.success) {
-        document.getElementById("token-card").style.display = "none";
-        activeToken = null;
-      }
-    } catch (_) {}
-    loadPayer();
   });
 
   document.getElementById("btn-refresh-payer")?.addEventListener("click", async () => {
@@ -236,11 +224,25 @@ if (role === "merchant") {
 
       const tbody = document.getElementById("merchant-queue-tbody");
       if (!data.queue || data.queue.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);">No payments received yet.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--muted);">No payments received yet.</td></tr>';
       } else {
+        const now = Date.now() / 1000;
         tbody.innerHTML = data.queue.map(q => {
-          return `<tr><td><code>${esc(q.token_id.slice(0, 8))}...</code></td><td>${esc(q.payer_id)}</td><td>₹${(q.amount_paise / 100).toFixed(2)}</td><td>${badge(q.status)}</td><td><small>${esc(q.reason || "—")}</small></td></tr>`;
+          let note = q.reason || "—";
+          if (q.status === "PENDING") note = now < q.sync_deadline
+            ? `Guaranteed if synced before ${when(q.sync_deadline)}`
+            : `Sync deadline passed (${when(q.sync_deadline)})`;
+          const act = ["PENDING", "SETTLED"].includes(q.status)
+            ? `<button class="btn btn-secondary btn-refund-row" data-tid="${esc(q.token_id)}" style="padding:4px 8px;font-size:12px;">Refund</button>` : "—";
+          return `<tr><td><code>${esc(q.token_id.slice(0, 8))}...</code></td><td>${esc(q.payer_id)}</td><td>₹${(q.amount_paise / 100).toFixed(2)}</td><td>${badge(q.status)}</td><td><small>${esc(note)}</small></td><td>${act}</td></tr>`;
         }).join("");
+        document.querySelectorAll(".btn-refund-row").forEach(btn => {
+          btn.addEventListener("click", async () => {
+            btn.disabled = true;
+            try { const r = await api("/api/merchant/refund", { token_id: btn.dataset.tid }); showBanner(r.message, "success"); } catch (_) {}
+            loadMerchant();
+          });
+        });
       }
     } catch (_) {}
   }

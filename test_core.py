@@ -1,7 +1,9 @@
 """Offline UPI tests. Run:  python -m unittest test_core -v
 Covers boundary values on the ₹500 cap, input validation, double-spend, and the
-cancel-vs-settle race (the bank is the single source of truth: first to reach it wins)."""
+time windows: a handed-over payment is final for the merchant window (LOCK_S); only an unused
+token can be reclaimed after it, and only the merchant can refund."""
 import time, unittest
+import core
 from core import Bank, Merchant, Payer, generate_keypair, validate_payload, sign_data
 
 M = "chai_corner@upi"
@@ -70,29 +72,66 @@ class TestMerchant(Base):
         self.assertFalse(self.merchant.verify_and_queue(pkg)[0])
 
 class TestScenarios(Base):
-    def test_A_merchant_syncs_first_cancel_loses(self):
-        pkg = self.payer.create_token(M, 12_000); tid = pkg["payload"]["tokenID"]
+    def _pay_and_accept(self, amt=12_000):
+        pkg = self.payer.create_token(M, amt)
         self.assertTrue(self.merchant.verify_and_queue(pkg)[0])
-        cancel = self.payer.request_cancel(tid)                 # bank offline: cancel stays pending
-        self.assertEqual(self.remaining(), 38_000)               # still blocked
-        self.assertEqual(self.sync()[0]["status"], "SETTLED")    # merchant reaches bank first
-        ok, st, _ = self.bank.cancel_token(cancel)               # late cancel refused
-        self.assertFalse(ok); self.assertEqual(st, "SETTLED")
-        self.payer.apply_cancel_result(tid, st)
+        return pkg, pkg["payload"]["tokenID"], pkg["payload"]["timestamp"]
+
+    def test_A_payer_cannot_cancel_handed_over_token(self):
+        # Your scenario: bank outage, merchant accepted and handed over goods, payer tries to cancel.
+        pkg, tid, ts = self._pay_and_accept()
+        signed, why = self.payer.request_cancel(tid)
+        self.assertIsNone(signed); self.assertIn("Locked", why)          # wallet refuses
+        forged = self.payer._signed_cancel(tid)                         # even a hand-made request...
+        ok, st, _ = self.bank.cancel_token(forged)
+        self.assertFalse(ok); self.assertEqual(st, "LOCKED")             # ...is refused by the bank
+        self.assertEqual(self.remaining(), 38_000)                       # money stays blocked
+
+    def test_B_merchant_paid_even_if_sync_is_late_within_window(self):
+        pkg, tid, ts = self._pay_and_accept()
+        res = self.bank.settle_batch(M, [pkg], now=ts + core.LOCK_S - 60)  # outage lasted almost 48 h
+        self.merchant.apply_sync_results(res)
+        self.assertEqual(res[0]["status"], "SETTLED")
         self.refresh()
         self.assertEqual(self.status(tid), "SETTLED")
-        self.assertEqual(self.remaining(), 50_000)               # cycle complete, money went to merchant once
+        self.assertEqual(self.payer.get_info()["paid_paise"], 12_000)
 
-    def test_B_cancel_reaches_bank_first(self):
-        pkg = self.payer.create_token(M, 12_000); tid = pkg["payload"]["tokenID"]
-        self.merchant.verify_and_queue(pkg)
-        ok, st, _ = self.bank.cancel_token(self.payer.request_cancel(tid))
+    def test_reclaim_unused_token_after_window(self):
+        pkg = self.payer.create_token(M, 5_000); tid, ts = pkg["payload"]["tokenID"], pkg["payload"]["timestamp"]
+        later = ts + core.LOCK_S + 1
+        signed, _ = self.payer.request_cancel(tid, now=later)
+        ok, st, _ = self.bank.cancel_token(signed, now=later)
         self.assertTrue(ok); self.assertEqual(st, "VOIDED")
         self.payer.apply_cancel_result(tid, st)
-        self.assertEqual(self.remaining(), 50_000)
-        res = self.sync()
-        self.assertEqual(res[0]["status"], "CANCELLED_BY_PAYER")
+        self.assertEqual(self.status(tid), "CANCELLED"); self.assertEqual(self.remaining(), 50_000)
+
+    def test_sync_after_deadline_is_expired(self):
+        pkg, tid, ts = self._pay_and_accept()
+        res = self.bank.settle_batch(M, [pkg], now=ts + core.LOCK_S + 1)
+        self.assertEqual(res[0]["status"], "EXPIRED")
         self.assertEqual(self.bank.get_stats()["settled_count"], 0)
+
+    def test_merchant_refund_before_sync(self):
+        pkg, tid, ts = self._pay_and_accept()
+        ok, st, _ = self.bank.merchant_refund(M, pkg)
+        self.assertTrue(ok); self.assertEqual(st, "VOIDED")
+        self.refresh()
+        self.assertEqual(self.status(tid), "CANCELLED"); self.assertEqual(self.remaining(), 50_000)
+        self.assertEqual(self.bank.settle_batch(M, [pkg])[0]["status"], "CANCELLED_BY_PAYER")  # can't settle after refund
+
+    def test_merchant_refund_after_settlement(self):
+        pkg, tid, ts = self._pay_and_accept()
+        self.sync(); self.refresh()
+        self.assertEqual(self.payer.get_info()["paid_paise"], 12_000)
+        ok, st, _ = self.bank.merchant_refund(M, pkg)
+        self.assertTrue(ok); self.assertEqual(st, "REFUNDED")
+        self.refresh()
+        self.assertEqual(self.status(tid), "REFUNDED"); self.assertEqual(self.payer.get_info()["paid_paise"], 0)
+
+    def test_other_merchant_cannot_refund(self):
+        pkg, tid, ts = self._pay_and_accept()
+        ok, st, _ = self.bank.merchant_refund("evil@upi", pkg)
+        self.assertFalse(ok)
 
     def test_C_refresh_is_idempotent(self):
         pkg = self.payer.create_token(M, 10_000)

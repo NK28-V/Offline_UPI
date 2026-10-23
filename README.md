@@ -10,7 +10,7 @@ This academic prototype demonstrates a trustless, delayed-settlement offline pay
 |      (Port 5001)      |                    |      (Port 5002)      |                    |      (Port 5003)      |
 +-----------------------+                    +-----------------------+                    +-----------------------+
             |                                            |                                            |
-            |   1. Offline QR / JSON Token               |                                            |
+            |   1. Offline JSON Token                    |                                            |
             |   (Zero Network Required)                  |                                            |
             +------------------------------------------->|                                            |
             |                                            |   2. Delayed Batch Sync (LAN HTTP)         |
@@ -76,9 +76,9 @@ Open in separate browser tabs:
 1. Enters a UPI ID (e.g., `ravi@upi`) and registers their public key with the Bank to activate an offline wallet.
 2. Enters a payment amount (e.g., ₹120.00) and Merchant UPI ID to mint a cryptographically signed token.
 3. Observes offline allowance decrease (₹500.00 cap tracked in exact paise).
-4. Presents the generated QR code or clicks "Copy JSON" to hand off payment to the merchant. Click **View** on any row in "Recent Offline Payments" to see that token's QR and JSON again. If auto-copy is blocked (e.g. when opened via a LAN IP), select the JSON box and press Ctrl+C.
+4. Clicks "Copy JSON" or "Download .json" and hands the token to the merchant (WhatsApp, Bluetooth, USB; no internet needed). Click **View** on any row in "Recent Offline Payments" to see that token's JSON again. If auto-copy is blocked (e.g. when opened via a LAN IP), select the JSON box and press Ctrl+C.
 5. Clicks "Refresh from Bank" when online to reconcile settled tokens and restore available spending limit.
-6. Can click "Request cancel" on an unsynced payment. This is only a *request*; see "Cancel Rules" below.
+6. A handed-over payment is **final**. Only an *unused* token can be reclaimed, after the merchant window ends (see "Payment Finality Rules").
 
 ## 6-Step End-to-End Demo Script
 
@@ -89,7 +89,7 @@ Open in separate browser tabs:
 2. **Simulate Outage**:
    - Open http://127.0.0.1:5003/, click "Simulate Outage" (status changes to OFFLINE).
 3. **Pay Offline**:
-   - On Payer page, enter Amount `120` and Payee `chai_corner@upi`, then click "Generate Signed Payment QR".
+   - On Payer page, enter Amount `120` and Payee `chai_corner@upi`, then click "Generate Signed Payment Token".
    - Remaining allowance drops to ₹380.00. Click "Copy JSON".
 4. **Merchant Verifies Offline**:
    - On Merchant page, paste the token JSON into the textarea and click "Verify & Accept Offline".
@@ -102,27 +102,36 @@ Open in separate browser tabs:
    - On Bank page, click "Simulate Double-Spend".
    - The bank switch detects the replayed token ID and catches the violation atomically (`DUPLICATE`).
 
-7. **Cancel Race (edge case)**:
-   - Bank: "Simulate Outage". Payer: pay ₹50 to `chai_corner@upi`. Merchant: verify and accept it.
-   - Payer: click "Request cancel". The status becomes `CANCEL PENDING` and the ₹50 **stays blocked**.
-   - Bank: "Restore Network". Then **whoever reaches the bank first wins**:
-     - Merchant clicks "Sync with Bank" first: the payment is `SETTLED` and the payer's cancel is refused.
-     - Payer clicks "Refresh from Bank" first: the bank marks it `VOIDED`, the payer gets ₹50 back, and the merchant's later sync shows `CANCELLED BY PAYER`.
+7. **Payment Finality (edge case)**. Start with a short window for the demo: `python server.py all --lock-seconds 120`.
+   - Bank: "Simulate Outage". Payer: pay ₹50. Merchant: accept it. The note says *"Guaranteed if synced before …"*.
+   - Payer: the row shows *"reclaim after …"*. There is **no way to cancel** a handed-over payment, so the merchant can safely hand over the goods.
+   - Bank: "Restore Network". Merchant: "Sync with Bank" → `SETTLED`.
+   - **Refund:** the merchant can click **Refund** on a pending or settled payment (needs the bank online). The payer gets the amount back after "Refresh from Bank".
+   - **Unused token:** generate a token and do not give it to anyone. After the window, the payer can click **Reclaim unused** and the ₹ is restored.
 
-## Cancel Rules
+## Payment Finality Rules
 
-Offline, the payer cannot know whether the merchant has already synced, so the **bank decides**:
+Each token has two **non-overlapping** time windows, counted from its timestamp (default 48 h, set with `--lock-seconds` on the bank):
+
+| Window | Who can act | Effect |
+|---|---|---|
+| `0 → lock` (merchant window) | **Merchant** syncs → `SETTLED` | Payer reclaim is **refused** (`LOCKED`). A merchant who syncs in time is **always paid**. |
+| after `lock` (payer window) | **Payer** reclaims an **unused** token → `CANCELLED` | A late merchant sync is refused (`EXPIRED`). |
+| any time | **Merchant** refunds → `REFUNDED` (or voided before sync) | The honest way to undo a sale. |
+
+- The merchant accepts only tokens younger than **half** the window, so it always has at least `lock/2` to sync.
+- Payer and merchant automatically use the **bank's** window, read at registration, so all devices agree on the deadlines.
 
 | Payer token status | Counts against ₹500? | Meaning |
 |---|---|---|
-| `CREATED` | Yes | Signed and handed over, not yet seen by the bank |
-| `CANCEL_PENDING` | Yes | Cancel requested while the bank was unreachable |
-| `CANCELLED` | No | Bank confirmed the void (`VOIDED` in the ledger) |
-| `SETTLED` / `FLAGGED` | No | Bank received it from the merchant; the money is gone |
+| `CREATED` | Yes | Handed over (or not yet); bank has not decided |
+| `CANCEL_PENDING` | Yes | Reclaim sent while the bank was unreachable |
+| `SETTLED` | No | Bank paid the merchant; the money is gone |
+| `CANCELLED` / `REFUNDED` | No | Money returned to the payer (unused reclaim or merchant refund) |
 
-**Offline limit is not a balance.** The ₹500 is how much you may owe the bank *offline* at once. When a payment is `SETTLED`, the bank has debited your account, so that amount stops counting against the limit. The limit goes back up to ₹500, but "Total paid" goes up too. That is not a refund. Only `CANCELLED` (bank-confirmed void) is a refund.
+**Offline limit is not a balance.** The ₹500 is how much you may owe the bank *offline* at once. When a payment is `SETTLED`, the bank has debited your account, so that amount stops counting against the limit. The limit goes back up to ₹500, but "Total paid" goes up too. That is not a refund.
 
-Allowance is freed **only** by a bank-signed answer: the cancel response or the signed statement. The bank ledger's `token_id` PRIMARY KEY makes "settle" and "cancel" mutually exclusive, so one token can never be both paid and refunded.
+The bank ledger's `token_id` PRIMARY KEY guarantees a token is settled, voided or refunded **once**, never two ways.
 
 ## Testing
 
@@ -130,11 +139,12 @@ Allowance is freed **only** by a bank-signed answer: the cancel response or the 
 python -m unittest test_core -v
 ```
 
-There are 14 tests:
+There are 19 tests:
 - ₹500 cap boundaries (₹0, ₹0.01, exactly ₹500, ₹500.01);
 - bad input such as `"abc"`, floats, future timestamps and garbage JSON;
 - a tampered amount, a wrong payee and replay;
-- the cancel race both ways;
+- payment finality: the payer cannot cancel a handed-over token, a late sync within the window is still paid, a sync after the deadline is `EXPIRED`, and an unused token is reclaimed after the window;
+- merchant refund before and after settlement, and another shop trying to refund;
 - an idempotent refresh;
 - blocked ID takeover, double-spend, and a forged cancel or bank statement.
 
@@ -147,8 +157,7 @@ Stop the servers and delete the `*.db` files in the project folder. IDs are firs
 - `core.py`: Pure domain logic (RSA-2048 crypto, canonical JSON, Payer wallet, Merchant POS, and Bank switch classes).
 - `server.py`: Unified Flask application and multi-process CLI runner (`payer`, `merchant`, `bank`, `all`).
 - `templates/index.html`: Unified Jinja HTML template with embedded responsive design system for all three roles.
-- `static/app.js`: Client-side logic for offline QR generation, clipboard handling, and API integration.
-- `static/qrcode.min.js`: Vendored client-side QR code generator (works 100% offline).
+- `static/app.js`: Client-side logic for token display, clipboard handling, refunds/reclaims, and API integration.
 - `test_core.py`: Unit tests for the core protocol (standard-library `unittest`, no extra install).
 - `README.md`: System documentation, architecture diagram, and operational guides.
 
@@ -156,7 +165,7 @@ Stop the servers and delete the `*.db` files in the project folder. IDs are firs
 
 - **Academic Prototype**: Designed for protocol demonstration; not hardened for production financial environments.
 - **Unencrypted Keys on Disk**: Private RSA keys and SQLite databases are stored in plaintext on the local filesystem (production deployments would use hardware keystores / Secure Enclave and password encryption).
-- **Offline cancel is a request, not a guarantee**: if the merchant syncs first, the payment stands. This mirrors real UPI Lite, where a handed-over payment cannot be pulled back.
+- **Merchant must sync within the window**: a merchant who stays offline longer than the window loses the guarantee (`EXPIRED`), just as a cheque must be deposited before it expires.
 - **IDs are first-come-first-served**: the bank refuses (409) a second registration of the same payer or merchant ID. There is no account recovery flow.
-- **Outage simulation** blocks merchant sync, payer cancel and payer statements. Registration still works so setup stays easy.
+- **Outage simulation** blocks merchant sync, refunds, payer reclaims and payer statements. Registration still works so setup stays easy.
 - **Simulated Settlement**: Ledger updates reflect cryptographic agreement and double-spend tracking; no actual fiat or central bank money movement occurs.

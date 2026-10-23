@@ -1,6 +1,7 @@
 import argparse, json, os, secrets, subprocess, sys, time, urllib.error, urllib.request
 from typing import Any, Dict, Optional, Tuple
 from flask import Flask, jsonify, render_template, request
+import core
 from core import Bank, Merchant, Payer, generate_keypair
 
 def http_json(url: str, data: Optional[Dict] = None, headers: Optional[Dict] = None) -> Tuple[int, Any]:
@@ -21,6 +22,19 @@ def http_json(url: str, data: Optional[Dict] = None, headers: Optional[Dict] = N
     except Exception as e:
         return 503, {"error": f"Connection error to {url}: {str(e)}"}
 
+def get_cfg(obj, key):
+    cur = obj.conn.cursor()
+    cur.execute("SELECT value FROM config WHERE key = ?", (key,))
+    row = cur.fetchone()
+    return row["value"] if row else None
+
+def adopt_lock(obj, lock_s):
+    """Payer & merchant use the BANK's lock window so all three devices agree on the deadlines."""
+    if isinstance(lock_s, int) and lock_s > 0:
+        core.LOCK_S = lock_s
+        with obj.conn:
+            obj.conn.execute("INSERT OR REPLACE INTO config (key, value) VALUES ('lock_s', ?)", (str(lock_s),))
+
 def create_app(role: str, port: int, bank_url: str = "http://127.0.0.1:5003") -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     bank_url = bank_url.rstrip("/")
@@ -38,6 +52,7 @@ def create_app(role: str, port: int, bank_url: str = "http://127.0.0.1:5003") ->
 
     if role == "payer":
         payer = Payer(f"payer_{port}.db")
+        if get_cfg(payer, "lock_s"): core.LOCK_S = int(get_cfg(payer, "lock_s"))
 
         @app.route("/api/payer/state")
         def payer_state():
@@ -55,6 +70,7 @@ def create_app(role: str, port: int, bank_url: str = "http://127.0.0.1:5003") ->
             st, reg_res = http_json(f"{b_url}/api/bank/register_payer", {"payer_id": pid, "public_key_pem": pub_pem})
             if st != 200: return jsonify({"error": f"Registration rejected by bank: {reg_res.get('error')}"}), (409 if st == 409 else 502)
             payer.register(pid, b_url, res["public_key_pem"], priv_pem, pub_pem)
+            adopt_lock(payer, res.get("lock_s"))
             return jsonify({"success": True, "message": f"Wallet registered for {pid}"})
 
         @app.route("/api/payer/create_token", methods=["POST"])
@@ -88,18 +104,20 @@ def create_app(role: str, port: int, bank_url: str = "http://127.0.0.1:5003") ->
             tid = (request.get_json(silent=True) or {}).get("token_id")
             info = payer.get_info()
             if not info["registered"]: return jsonify({"error": "Wallet not registered"}), 400
-            cancel_pkg = payer.request_cancel(tid) if isinstance(tid, str) else None
-            if not cancel_pkg: return jsonify({"error": "Could not cancel token (not found, already settled or already cancelled)."}), 400
+            if not isinstance(tid, str): return jsonify({"error": "token_id required"}), 400
+            cancel_pkg, why = payer.request_cancel(tid)
+            if not cancel_pkg: return jsonify({"error": why}), 409
             outcome, detail = send_cancel(cancel_pkg, info["bank_url"])
             msgs = {
-                "CANCELLED": ("Cancellation confirmed by bank. Allowance restored.", "success"),
-                "SETTLED": ("Too late to cancel: the merchant already synced this payment, so it is PAID and NOT refunded. "
-                            "Your offline limit is refilled only because the bank has already debited your account.", "danger"),
-                "FLAGGED": ("Too late to cancel: the bank already received this token (flagged for review). It stays spent.", "danger"),
-                "CANCEL_PENDING": ("Bank unreachable, so cancellation is PENDING. Amount stays blocked until the bank confirms "
-                                   "(the merchant may still sync it first). Click 'Refresh from Bank' when online.", "warning"),
+                "CANCELLED": (detail or "Reclaim confirmed by bank. Amount restored.", "success"),
+                "REFUNDED": ("The merchant already refunded this payment.", "success"),
+                "SETTLED": ("Cannot reclaim: the merchant synced this payment in time, so it stays PAID.", "danger"),
+                "FLAGGED": ("Cannot reclaim: the bank already received this token. It stays paid.", "danger"),
+                "CREATED": (detail or "Still locked: the merchant window is open.", "warning"),
+                "CANCEL_PENDING": ("Bank unreachable, so the reclaim is PENDING. Amount stays blocked until the bank confirms. "
+                                   "Click 'Refresh from Bank' when online.", "warning"),
             }
-            msg, level = msgs[outcome]
+            msg, level = msgs.get(outcome, (detail, "warning"))
             return jsonify({"success": True, "outcome": outcome, "level": level, "message": msg})
 
         @app.route("/api/payer/refresh", methods=["POST"])
@@ -118,8 +136,8 @@ def create_app(role: str, port: int, bank_url: str = "http://127.0.0.1:5003") ->
             except ValueError as e:
                 return jsonify({"error": str(e)}), 400
             after = payer.get_info()["tokens"]
-            c = {"SETTLED": 0, "CANCELLED": 0, "FLAGGED": 0}
-            amt = {"SETTLED": 0, "CANCELLED": 0, "FLAGGED": 0}
+            c = {"SETTLED": 0, "CANCELLED": 0, "FLAGGED": 0, "REFUNDED": 0}
+            amt = {"SETTLED": 0, "CANCELLED": 0, "FLAGGED": 0, "REFUNDED": 0}
             for t in after:
                 if before.get(t["token_id"]) != t["status"] and t["status"] in c:
                     c[t["status"]] += 1; amt[t["status"]] += t["amount_paise"]
@@ -128,13 +146,15 @@ def create_app(role: str, port: int, bank_url: str = "http://127.0.0.1:5003") ->
             paid = amt["SETTLED"] + amt["FLAGGED"]
             if paid: parts.append(f"₹{paid/100:.2f} PAID to merchant ({c['SETTLED'] + c['FLAGGED']} token(s), debited from your bank account). "
                                   f"Your offline limit is refilled because the bank has collected it. This is NOT a refund.")
-            if c["CANCELLED"]: parts.append(f"₹{amt['CANCELLED']/100:.2f} REFUNDED ({c['CANCELLED']} cancellation(s) confirmed by bank; merchant was never paid).")
-            if still: parts.append(f"{still} cancellation(s) still pending.")
+            back = amt["CANCELLED"] + amt["REFUNDED"]
+            if back: parts.append(f"₹{back/100:.2f} RETURNED to you ({c['CANCELLED'] + c['REFUNDED']} token(s): merchant refund or unused-token reclaim).")
+            if still: parts.append(f"{still} reclaim(s) still pending.")
             msg = " ".join(parts) or "Up to date. Nothing new from the bank."
             return jsonify({"success": True, "reconciled": c, "message": msg})
 
     elif role == "merchant":
         merchant = Merchant(f"merchant_{port}.db")
+        if get_cfg(merchant, "lock_s"): core.LOCK_S = int(get_cfg(merchant, "lock_s"))
 
         @app.route("/api/merchant/state")
         def merchant_state():
@@ -151,6 +171,7 @@ def create_app(role: str, port: int, bank_url: str = "http://127.0.0.1:5003") ->
             st, res = http_json(f"{b_url}/api/bank/register_merchant", {"merchant_id": mid, "merchant_url": m_url})
             if st != 200: return jsonify({"error": f"Bank registration failed: {res.get('error')}"}), (409 if st == 409 else 502)
             merchant.register(mid, b_url, m_url, res["api_key"])
+            adopt_lock(merchant, res.get("lock_s"))
             _, p_res = http_json(f"{b_url}/api/bank/trusted_payers")
             if isinstance(p_res, list): merchant.update_trusted_payers(p_res)
             return jsonify({"success": True, "message": f"Shop {mid} registered."})
@@ -186,6 +207,19 @@ def create_app(role: str, port: int, bank_url: str = "http://127.0.0.1:5003") ->
             if ok: return jsonify({"success": True, "message": msg})
             return jsonify({"success": False, "error": msg, "message": msg}), 400
 
+        @app.route("/api/merchant/refund", methods=["POST"])
+        def merchant_refund():
+            info = merchant.get_info()
+            if not info["registered"]: return jsonify({"error": "Shop not registered"}), 400
+            tid = (request.get_json(silent=True) or {}).get("token_id")
+            t = merchant.get_token_pkg(tid) if isinstance(tid, str) else None
+            if not t: return jsonify({"error": "Payment not found in this shop's queue."}), 404
+            if t["status"] not in ("PENDING", "SETTLED"): return jsonify({"error": f"Cannot refund a payment that is {t['status']}."}), 409
+            st, res = http_json(f"{info['bank_url']}/api/bank/merchant_refund", {"merchant_id": info["merchant_id"], "token_package": t["token_package"]}, {"X-Merchant-Key": merchant.get_api_key()})
+            if st != 200: return jsonify({"error": f"Refund needs the bank online: {res.get('error', 'unreachable')}"}), 502
+            merchant.mark_refunded(tid, res.get("message", "Refunded"))
+            return jsonify({"success": True, "message": res.get("message", "Refunded.")})
+
         @app.route("/api/merchant/sync", methods=["POST"])
         def merchant_sync():
             info = merchant.get_info()
@@ -210,11 +244,11 @@ def create_app(role: str, port: int, bank_url: str = "http://127.0.0.1:5003") ->
         @app.route("/api/bank/state")
         def bank_state():
             stats = bank.get_stats()
-            return jsonify({"network_online": net["online"], "public_key": bank.get_public_key(), "stats": stats})
+            return jsonify({"network_online": net["online"], "public_key": bank.get_public_key(), "lock_s": core.LOCK_S, "stats": stats})
 
         @app.route("/api/bank/public_key")
         def bank_pub():
-            return jsonify({"public_key_pem": bank.get_public_key()})
+            return jsonify({"public_key_pem": bank.get_public_key(), "lock_s": core.LOCK_S})
 
         @app.route("/api/bank/register_payer", methods=["POST"])
         def bank_reg_payer():
@@ -229,7 +263,7 @@ def create_app(role: str, port: int, bank_url: str = "http://127.0.0.1:5003") ->
             key = secrets.token_hex(16)
             ok, msg = bank.register_merchant(d.get("merchant_id"), d.get("merchant_url"), key)
             if not ok: return jsonify({"error": msg}), (409 if "already registered" in msg else 400)
-            return jsonify({"success": True, "api_key": key})
+            return jsonify({"success": True, "api_key": key, "lock_s": core.LOCK_S})
 
         @app.route("/api/bank/trusted_payers")
         def bank_payers():
@@ -259,6 +293,17 @@ def create_app(role: str, port: int, bank_url: str = "http://127.0.0.1:5003") ->
             if status == "INVALID": return jsonify({"error": msg}), 400
             return jsonify({"success": ok, "status": status, "message": msg}), (200 if ok else 409)
 
+        @app.route("/api/bank/merchant_refund", methods=["POST"])
+        def bank_merchant_refund():
+            if not net["online"]: return jsonify({"error": "Bank network offline (Simulated Outage)"}), 503
+            d = request.get_json(silent=True)
+            if not isinstance(d, dict): return jsonify({"error": "JSON body required"}), 400
+            mid = d.get("merchant_id", "")
+            if not bank.verify_merchant(mid, request.headers.get("X-Merchant-Key", "")): return jsonify({"error": "Invalid merchant API credentials"}), 401
+            ok, status, msg = bank.merchant_refund(mid, d.get("token_package"))
+            if not ok: return jsonify({"error": msg}), 400
+            return jsonify({"success": True, "status": status, "message": msg})
+
         @app.route("/api/bank/payer_settlement/<payer_id>")
         def bank_stmt(payer_id):
             if not net["online"]: return jsonify({"error": "Bank network offline (Simulated Outage)"}), 503
@@ -286,14 +331,17 @@ def main():
     parser.add_argument("role", choices=["payer", "merchant", "bank", "all"])
     parser.add_argument("--port", type=int)
     parser.add_argument("--bank-url", default="http://127.0.0.1:5003")
+    parser.add_argument("--lock-seconds", type=int, default=48 * 3600,
+                        help="Merchant settlement window (bank side). Default 48h; use e.g. 120 for a live demo.")
     args = parser.parse_args()
+    core.LOCK_S = args.lock_seconds
 
     default_ports = {"payer": 5001, "merchant": 5002, "bank": 5003}
     if args.role == "all":
         here = os.path.abspath(__file__)
         print("Starting Offline UPI — All 3 roles: Payer (5001), Merchant (5002), Bank (5003)...")
         procs = [
-            subprocess.Popen([sys.executable, here, "bank", "--port", "5003"]),
+            subprocess.Popen([sys.executable, here, "bank", "--port", "5003", "--lock-seconds", str(args.lock_seconds)]),
             subprocess.Popen([sys.executable, here, "merchant", "--port", "5002", "--bank-url", "http://127.0.0.1:5003"]),
             subprocess.Popen([sys.executable, here, "payer", "--port", "5001", "--bank-url", "http://127.0.0.1:5003"]),
         ]
@@ -305,7 +353,8 @@ def main():
 
     port = args.port or default_ports[args.role]
     app = create_app(args.role, port, args.bank_url)
-    print(f"Offline UPI [{args.role.upper()}] running at http://127.0.0.1:{port}/")
+    lock = f" · merchant window {args.lock_seconds}s" if args.role == "bank" else ""
+    print(f"Offline UPI [{args.role.upper()}] running at http://127.0.0.1:{port}/{lock}")
     app.run(host="0.0.0.0", port=port, debug=False)
 
 if __name__ == "__main__":

@@ -4,8 +4,20 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 OFFLINE_CAP_PAISE = 50_000      # ₹500 offline spending cap
-MAX_TOKEN_AGE_S = 86_400        # tokens older than 24h are not accepted / flagged
 MAX_CLOCK_SKEW_S = 300          # tokens dated >5 min in the future are rejected
+
+# Two non-overlapping time windows per token (counted from the token's timestamp):
+#   0 .. LOCK_S      MERCHANT WINDOW: only the merchant can settle; payer reclaim is refused.
+#   after LOCK_S     PAYER WINDOW:    only an unclaimed token can be reclaimed by the payer.
+# So a merchant who syncs within LOCK_S is ALWAYS paid. server.py can shorten LOCK_S for demos.
+LOCK_S = 48 * 3600
+
+def accept_age_s() -> int:
+    """Merchant only accepts tokens younger than half the lock, so it always has >= LOCK_S/2 to sync."""
+    return LOCK_S // 2
+
+def fmt_time(ts: int) -> str:
+    return time.strftime("%d %b %Y, %H:%M:%S", time.localtime(ts))
 
 # --- Crypto: RSA-2048, RSA-PSS SHA-256, Canonical JSON ---
 
@@ -59,9 +71,9 @@ def validate_payload(payload: Any, now: Optional[int] = None) -> Optional[str]:
     return None
 
 # --- Payer: Offline Wallet, Cap = 50,000 Paise (₹500) ---
-# Token states: CREATED -> SETTLED | FLAGGED          (merchant reached the bank first)
-#               CREATED -> CANCEL_PENDING -> CANCELLED (payer's cancel reached the bank first)
-#               CANCEL_PENDING -> SETTLED              (cancel lost the race; money already went to merchant)
+# Token states: CREATED -> SETTLED                    (merchant synced within its window)
+#               CREATED -> CANCEL_PENDING -> CANCELLED (payer reclaimed an UNUSED token after the lock)
+#               CREATED/SETTLED -> REFUNDED            (merchant chose to refund)
 # CREATED and CANCEL_PENDING both still count as SPENT. Allowance is only freed by a bank-signed answer.
 
 SPENT_STATES = ("CREATED", "CANCEL_PENDING")
@@ -94,9 +106,15 @@ class Payer:
         cur.execute("SELECT SUM(amount_paise) FROM tokens WHERE status IN ('SETTLED', 'FLAGGED')")
         paid = cur.fetchone()[0] or 0
         cur.execute("SELECT token_id, payee_id, amount_paise, status, created_at FROM tokens ORDER BY created_at DESC")
-        tokens = [dict(r) for r in cur.fetchall()]
+        now = int(time.time())
+        tokens = []
+        for r in cur.fetchall():
+            t = dict(r)
+            t["unlock_at"] = t["created_at"] + LOCK_S        # when the payer may reclaim (if unused)
+            t["can_reclaim"] = t["status"] == "CREATED" and now >= t["unlock_at"]
+            tokens.append(t)
         # spent_paise = blocked offline (bank hasn't decided yet); paid_paise = already debited from the bank account.
-        return {"registered": True, "payer_id": cfg["payer_id"], "bank_url": cfg.get("bank_url"), "cap_paise": self.OFFLINE_CAP_PAISE, "spent_paise": spent, "paid_paise": paid, "remaining_paise": max(0, self.OFFLINE_CAP_PAISE - spent), "tokens": tokens}
+        return {"registered": True, "payer_id": cfg["payer_id"], "bank_url": cfg.get("bank_url"), "cap_paise": self.OFFLINE_CAP_PAISE, "spent_paise": spent, "paid_paise": paid, "remaining_paise": max(0, self.OFFLINE_CAP_PAISE - spent), "lock_s": LOCK_S, "tokens": tokens}
 
     def register(self, payer_id: str, bank_url: str, bank_pub_key: str, priv_pem: str, pub_pem: str):
         """Called only AFTER the bank accepted the public key, so a rejected ID never leaves a half-registered wallet."""
@@ -131,11 +149,21 @@ class Payer:
         payload = {"action": "CANCEL", "tokenID": p["tokenID"], "payerID": p["payerID"], "payeeID": p["payeeID"], "amount_paise": p["amount_paise"], "timestamp": p["timestamp"]}
         return {"payload": payload, "signature": sign_data(payload, self._cfg("private_key"))}
 
-    def request_cancel(self, token_id: str) -> Optional[Dict[str, Any]]:
-        """Marks a CREATED token as CANCEL_PENDING (still counts as spent) and returns the signed cancel request for the bank."""
+    def request_cancel(self, token_id: str, now: Optional[int] = None) -> Tuple[Optional[Dict[str, Any]], str]:
+        """Reclaim an UNUSED token. Allowed only after the merchant window (LOCK_S) has passed.
+        Returns (signed request, "") or (None, reason). The token stays blocked until the bank answers."""
+        now = int(time.time()) if now is None else now
+        cur = self.conn.cursor()
+        cur.execute("SELECT status, created_at FROM tokens WHERE token_id = ?", (token_id,))
+        row = cur.fetchone()
+        if not row: return None, "Token not found in this wallet."
+        if row["status"] not in SPENT_STATES: return None, f"Token is already {row['status']}; nothing to reclaim."
+        if now < row["created_at"] + LOCK_S:
+            return None, (f"Locked until {fmt_time(row['created_at'] + LOCK_S)}. A handed-over payment is final; "
+                          "the merchant has until then to sync. Ask the merchant for a refund instead.")
         with self.conn:
-            res = self.conn.execute("UPDATE tokens SET status = 'CANCEL_PENDING' WHERE token_id = ? AND status IN ('CREATED', 'CANCEL_PENDING')", (token_id,))
-        return self._signed_cancel(token_id) if res.rowcount else None
+            self.conn.execute("UPDATE tokens SET status = 'CANCEL_PENDING' WHERE token_id = ?", (token_id,))
+        return self._signed_cancel(token_id), ""
 
     def pending_cancels(self) -> List[Dict[str, Any]]:
         cur = self.conn.cursor()
@@ -144,7 +172,7 @@ class Payer:
 
     def apply_cancel_result(self, token_id: str, bank_status: str) -> str:
         """bank_status is the bank's final word on the token: VOIDED -> CANCELLED (allowance back), SETTLED/FLAGGED -> stays spent."""
-        new = {"VOIDED": "CANCELLED", "SETTLED": "SETTLED", "FLAGGED": "FLAGGED"}.get(bank_status)
+        new = {"VOIDED": "CANCELLED", "SETTLED": "SETTLED", "FLAGGED": "FLAGGED", "REFUNDED": "REFUNDED", "LOCKED": "CREATED"}.get(bank_status)
         if new:
             with self.conn:
                 self.conn.execute(f"UPDATE tokens SET status = ? WHERE token_id = ? AND status IN {SPENT_STATES}", (new, token_id))
@@ -160,10 +188,12 @@ class Payer:
         counts = {}
         with self.conn:
             # WHERE status IN (CREATED, CANCEL_PENDING) makes this idempotent: refreshing 3 times frees allowance once.
-            for key, new in (("settled_token_ids", "SETTLED"), ("flagged_token_ids", "FLAGGED"), ("voided_token_ids", "CANCELLED")):
+            for key, new, allowed in (("settled_token_ids", "SETTLED", SPENT_STATES), ("flagged_token_ids", "FLAGGED", SPENT_STATES),
+                                      ("voided_token_ids", "CANCELLED", SPENT_STATES),
+                                      ("refunded_token_ids", "REFUNDED", SPENT_STATES + ("SETTLED", "FLAGGED"))):
                 n = 0
                 for tid in payload.get(key, []):
-                    n += self.conn.execute(f"UPDATE tokens SET status = ? WHERE token_id = ? AND status IN {SPENT_STATES}", (new, tid)).rowcount
+                    n += self.conn.execute(f"UPDATE tokens SET status = ? WHERE token_id = ? AND status IN {allowed}", (new, tid)).rowcount
                 counts[new.lower()] = n
         return counts
 
@@ -185,8 +215,14 @@ class Merchant:
         cfg = {r["key"]: r["value"] for r in cur.fetchall()}
         cur.execute("SELECT COUNT(*) FROM trusted_payers")
         p_count = cur.fetchone()[0]
-        cur.execute("SELECT token_id, payer_id, payee_id, amount_paise, status, reason, received_at FROM queue ORDER BY received_at DESC")
-        return {"registered": "merchant_id" in cfg, "merchant_id": cfg.get("merchant_id"), "bank_url": cfg.get("bank_url"), "merchant_url": cfg.get("merchant_url"), "trusted_payers_count": p_count, "queue": [dict(r) for r in cur.fetchall()]}
+        cur.execute("SELECT token_id, payer_id, payee_id, amount_paise, status, reason, received_at, token_pkg_json FROM queue ORDER BY received_at DESC")
+        queue = []
+        for r in cur.fetchall():
+            q = dict(r)
+            ts = json.loads(q.pop("token_pkg_json"))["payload"]["timestamp"]
+            q["sync_deadline"] = ts + LOCK_S                   # paid for sure if synced before this
+            queue.append(q)
+        return {"registered": "merchant_id" in cfg, "merchant_id": cfg.get("merchant_id"), "bank_url": cfg.get("bank_url"), "merchant_url": cfg.get("merchant_url"), "trusted_payers_count": p_count, "lock_s": LOCK_S, "queue": queue}
 
     def get_api_key(self) -> Optional[str]:
         cur = self.conn.cursor()
@@ -218,7 +254,7 @@ class Merchant:
         now = int(time.time())
         err = validate_payload(payload, now)
         if err: return False, err
-        if now - payload["timestamp"] > MAX_TOKEN_AGE_S: return False, "Token is older than 24 hours; ask the payer for a fresh one."
+        if now - payload["timestamp"] > accept_age_s(): return False, "Token is too old to accept safely; ask the payer for a fresh one."
 
         tid, payer_id, payee_id, amt = payload["tokenID"], payload["payerID"], payload["payeeID"], payload["amount_paise"]
         if payee_id != merchant_id: return False, f"Payee mismatch: Token intended for '{payee_id}', not '{merchant_id}'."
@@ -233,12 +269,22 @@ class Merchant:
 
         with self.conn:
             self.conn.execute("INSERT INTO queue VALUES (?, ?, ?, ?, 'PENDING', 'Awaiting bank sync', ?, ?)", (tid, payer_id, payee_id, amt, now, json.dumps(token_pkg)))
-        return True, "Payment verified and queued offline. Final only after bank sync."
+        return True, f"Payment verified offline. Guaranteed if you sync before {fmt_time(payload['timestamp'] + LOCK_S)}."
 
     def get_pending_batch(self) -> List[Dict[str, Any]]:
         cur = self.conn.cursor()
         cur.execute("SELECT token_pkg_json FROM queue WHERE status = 'PENDING' ORDER BY received_at ASC")
         return [json.loads(r["token_pkg_json"]) for r in cur.fetchall()]
+
+    def get_token_pkg(self, token_id: str) -> Optional[Dict[str, Any]]:
+        cur = self.conn.cursor()
+        cur.execute("SELECT token_pkg_json, status FROM queue WHERE token_id = ?", (token_id,))
+        row = cur.fetchone()
+        return {"token_package": json.loads(row["token_pkg_json"]), "status": row["status"]} if row else None
+
+    def mark_refunded(self, token_id: str, reason: str):
+        with self.conn:
+            self.conn.execute("UPDATE queue SET status = 'REFUNDED', reason = ? WHERE token_id = ?", (reason, token_id))
 
     def apply_sync_results(self, results: List[Dict[str, Any]]):
         with self.conn:
@@ -247,8 +293,8 @@ class Merchant:
                     self.conn.execute("UPDATE queue SET status = ?, reason = ? WHERE token_id = ? AND status = 'PENDING'", (item["status"], item.get("reason", ""), item["token_id"]))
 
 # --- Bank: Authoritative Ledger, Atomic Savepoints, Signatures ---
-# The ledger's token_id PRIMARY KEY is the single source of truth: whoever reaches the bank first
-# (merchant settlement OR payer cancel) claims the token; the second one is refused atomically.
+# The ledger's token_id PRIMARY KEY is the single source of truth. Settlement is only allowed inside the
+# merchant window and payer reclaim only after it, so the two can never race. A merchant may refund at any time.
 
 class Bank:
     def __init__(self, db_path: str = "bank.db"):
@@ -337,8 +383,8 @@ class Bank:
             cur.execute("SELECT status FROM ledger WHERE token_id = ?", (row[0],))
             return cur.fetchone()["status"]
 
-    def settle_batch(self, merchant_id: str, batch: Any) -> List[Dict[str, Any]]:
-        results, now = [], int(time.time())
+    def settle_batch(self, merchant_id: str, batch: Any, now: Optional[int] = None) -> List[Dict[str, Any]]:
+        results, now = [], int(time.time()) if now is None else now
         if not isinstance(batch, list): return results
         for idx, pkg in enumerate(batch):
             payload = pkg.get("payload") if isinstance(pkg, dict) else None
@@ -356,32 +402,59 @@ class Bank:
                 results.append({"token_id": tid, "status": "REJECTED", "reason": "Unknown payer or invalid signature"})
                 continue
 
-            status, reason = ("FLAGGED", "Token older than 24 hours") if (now - payload["timestamp"] > MAX_TOKEN_AGE_S) else ("SETTLED", "Settlement completed")
+            if now - payload["timestamp"] > LOCK_S:
+                r = f"Sync deadline passed ({fmt_time(payload['timestamp'] + LOCK_S)}). Token expired; payer may reclaim it."
+                self._log_attempt(payload, "EXPIRED", r, tid)
+                results.append({"token_id": tid, "status": "EXPIRED", "reason": r})
+                continue
+            status, reason = "SETTLED", "Settlement completed"
             existing = self._claim(f"sp_{idx}", (tid, payload["payerID"], payload["payeeID"], payload["amount_paise"], status, reason, payload["timestamp"], now))
             if existing is None:
                 results.append({"token_id": tid, "status": status, "reason": reason})
-            elif existing == "VOIDED":
-                r = "Payer cancelled this token before the merchant synced. Ask the customer to pay again."
-                self._log_attempt(payload, "CANCELLED_BY_PAYER", r, tid)
-                results.append({"token_id": tid, "status": "CANCELLED_BY_PAYER", "reason": r})
+            elif existing in ("VOIDED", "REFUNDED"):
+                r = "This token was already refunded/voided at the bank."
+                self._log_attempt(payload, "CANCELLED_BY_PAYER" if existing == "VOIDED" else "REFUNDED", r, tid)
+                results.append({"token_id": tid, "status": "REFUNDED" if existing == "REFUNDED" else "CANCELLED_BY_PAYER", "reason": r})
             else:
                 r = f"Double-spend attempt: Token already {existing}"
                 self._log_attempt(payload, "DUPLICATE", r, tid)
                 results.append({"token_id": tid, "status": "DUPLICATE", "reason": r})
         return results
 
-    def cancel_token(self, cancel_pkg: Any) -> Tuple[bool, str, str]:
-        """Payer-signed cancel. Returns (voided?, final_status, message). First to reach the bank wins."""
+    def cancel_token(self, cancel_pkg: Any, now: Optional[int] = None) -> Tuple[bool, str, str]:
+        """Payer-signed RECLAIM of an unused token. Refused (LOCKED) during the merchant window.
+        Returns (voided?, final_status, message)."""
+        now = int(time.time()) if now is None else now
         payload = cancel_pkg.get("payload") if isinstance(cancel_pkg, dict) else None
         sig = cancel_pkg.get("signature") if isinstance(cancel_pkg, dict) else None
         err = validate_payload(payload)
         if err or payload.get("action") != "CANCEL": return False, "INVALID", err or "Not a cancel request."
         if not self._payer_sig_ok(payload, sig): return False, "INVALID", "Unknown payer or invalid signature on cancel request."
         tid = payload["tokenID"]
-        existing = self._claim("sp_cancel", (tid, payload["payerID"], payload["payeeID"], payload["amount_paise"], "VOIDED", "Cancelled by payer before merchant sync", payload["timestamp"], int(time.time())))
-        if existing is None: return True, "VOIDED", "Cancellation confirmed by bank. Allowance restored."
-        if existing == "VOIDED": return True, "VOIDED", "Token was already cancelled."
-        return False, existing, f"Cannot cancel: merchant already synced this payment (status {existing}). It stays spent."
+        if now < payload["timestamp"] + LOCK_S:
+            return False, "LOCKED", f"Locked until {fmt_time(payload['timestamp'] + LOCK_S)}: the merchant window is still open."
+        existing = self._claim("sp_cancel", (tid, payload["payerID"], payload["payeeID"], payload["amount_paise"], "VOIDED", "Unused token reclaimed by payer after merchant window", payload["timestamp"], now))
+        if existing is None: return True, "VOIDED", "Reclaim confirmed: no merchant synced this token in time. Amount restored."
+        if existing in ("VOIDED", "REFUNDED"): return True, existing, "Token was already refunded."
+        return False, existing, f"Cannot reclaim: the merchant synced this payment in time (status {existing}). It stays paid."
+
+    def merchant_refund(self, merchant_id: str, token_pkg: Any) -> Tuple[bool, str, str]:
+        """Merchant-initiated refund (authenticated by the merchant API key in server.py).
+        Unsynced token -> VOIDED (never paid). Settled token -> REFUNDED (money returned)."""
+        payload = token_pkg.get("payload") if isinstance(token_pkg, dict) else None
+        sig = token_pkg.get("signature") if isinstance(token_pkg, dict) else None
+        err = validate_payload(payload)
+        if err: return False, "INVALID", err
+        if payload["payeeID"] != merchant_id: return False, "INVALID", "You can only refund payments made to your own shop."
+        if not self._payer_sig_ok(payload, sig): return False, "INVALID", "Invalid payer signature on token."
+        tid, now = payload["tokenID"], int(time.time())
+        existing = self._claim("sp_refund", (tid, payload["payerID"], payload["payeeID"], payload["amount_paise"], "VOIDED", "Refunded by merchant before sync", payload["timestamp"], now))
+        if existing is None: return True, "VOIDED", "Refund done: payment cancelled before settlement; customer's amount restored."
+        if existing == "SETTLED":
+            with self.conn:
+                self.conn.execute("UPDATE ledger SET status = 'REFUNDED', reason = 'Refunded by merchant after settlement', settled_at = ? WHERE token_id = ?", (now, tid))
+            return True, "REFUNDED", "Refund done: settled payment reversed; money returned to the customer."
+        return True, existing, f"Token is already {existing}."
 
     def simulate_duplicate(self) -> Dict[str, Any]:
         cur = self.conn.cursor()
@@ -396,10 +469,10 @@ class Bank:
     def get_payer_settlement_statement(self, payer_id: str) -> Dict[str, Any]:
         cur = self.conn.cursor()
         ids = {}
-        for status in ("SETTLED", "FLAGGED", "VOIDED"):
+        for status in ("SETTLED", "FLAGGED", "VOIDED", "REFUNDED"):
             cur.execute("SELECT token_id FROM ledger WHERE payer_id = ? AND status = ?", (payer_id, status))
             ids[status] = [r["token_id"] for r in cur.fetchall()]
-        payload = {"payer_id": payer_id, "settled_token_ids": ids["SETTLED"], "flagged_token_ids": ids["FLAGGED"], "voided_token_ids": ids["VOIDED"], "timestamp": int(time.time())}
+        payload = {"payer_id": payer_id, "settled_token_ids": ids["SETTLED"], "flagged_token_ids": ids["FLAGGED"], "voided_token_ids": ids["VOIDED"], "refunded_token_ids": ids["REFUNDED"], "timestamp": int(time.time())}
         return {"payload": payload, "signature": sign_data(payload, self._key("private_key"))}
 
     def get_stats(self) -> Dict[str, Any]:
